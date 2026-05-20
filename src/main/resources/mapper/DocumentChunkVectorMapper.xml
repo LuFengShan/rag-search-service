@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.rag.mapper.DocumentChunkVectorMapper">
+
+    <select id="findNearest" resultType="com.example.rag.entity.DocumentChunk">
+        SELECT dc.id, dc.document_id, dc.chunk_index, dc.content, dv.embedding, dc.created_at,
+               dv.embedding &lt;-&gt; CAST(#{queryVector} AS vector) AS distance
+        FROM document_chunk dc
+        LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        <where>
+            <if test="documentId != null">
+                dc.document_id = #{documentId}
+            </if>
+            <if test="documentId == null">
+                1=1
+            </if>
+        </where>
+        ORDER BY distance
+        LIMIT #{limit}
+    </select>
+
+    <select id="findNearestL2" resultType="com.example.rag.entity.DocumentChunk">
+        SELECT dc.id, dc.document_id, dc.chunk_index, dc.content, dv.embedding, dc.created_at,
+               dv.embedding &lt;#&gt; CAST(#{queryVector} AS vector) AS distance
+        FROM document_chunk dc
+        LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        <where>
+            <if test="documentId != null">
+                dc.document_id = #{documentId}
+            </if>
+            <if test="documentId == null">
+                1=1
+            </if>
+        </where>
+        ORDER BY distance
+        LIMIT #{limit}
+    </select>
+
+    <select id="findByCosineSimilarity" resultType="com.example.rag.entity.DocumentChunk">
+        SELECT dc.id, dc.document_id, dc.chunk_index, dc.content, dv.embedding, dc.created_at,
+               1 - (dv.embedding &lt;=&gt; CAST(#{queryVector} AS vector)) AS similarity
+        FROM document_chunk dc
+        LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        <where>
+            <if test="documentId != null">
+                dc.document_id = #{documentId}
+            </if>
+            <if test="documentId == null">
+                1=1
+            </if>
+        </where>
+        ORDER BY similarity DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="findByNegativeInnerProduct" resultType="com.example.rag.entity.DocumentChunk">
+        SELECT dc.id, dc.document_id, dc.chunk_index, dc.content, dv.embedding, dc.created_at,
+               dv.embedding &lt;@&gt; CAST(#{queryVector} AS vector) AS distance
+        FROM document_chunk dc
+        LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        <where>
+            <if test="documentId != null">
+                dc.document_id = #{documentId}
+            </if>
+            <if test="documentId == null">
+                1=1
+            </if>
+        </where>
+        ORDER BY distance
+        LIMIT #{limit}
+    </select>
+
+    <select id="findByDocumentIdOrderByChunkIndex" resultType="com.example.rag.entity.DocumentChunk">
+        SELECT dc.id, dc.document_id, dc.chunk_index, dc.content, dv.embedding, dc.created_at
+        FROM document_chunk dc
+        LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        WHERE dc.document_id = #{documentId}
+        ORDER BY chunk_index
+    </select>
+
+</mapper>

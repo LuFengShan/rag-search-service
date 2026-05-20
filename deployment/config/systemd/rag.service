@@ -1,0 +1,50 @@
+#================================================================
+# RAG知识库智能问答系统 - Systemd 服务配置
+# 适用于: Ubuntu 16.04+, CentOS 7+, Debian 9+
+#================================================================
+
+[Unit]
+Description=RAG Knowledge Base Q&A System
+Documentation=https://github.com/your-repo/rag-system
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=simple
+
+# 应用配置
+WorkingDirectory=/opt/rag/backend
+ExecStart=/usr/bin/java -Xms512m -Xmx1024m -XX:+UseG1GC \
+    -jar /opt/rag/backend/target/rag-1.0.0.jar
+
+# 环境变量
+Environment="JAVA_HOME=/usr/lib/jvm/temurin-21-jdk"
+Environment="SPRING_PROFILES_ACTIVE=prod"
+
+# 重启配置
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# 日志配置
+StandardOutput=append:/var/log/rag/stdout.log
+StandardError=append:/var/log/rag/stderr.log
+
+# 用户和组
+User=rag
+Group=rag
+
+# 安全配置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/rag /opt/rag
+
+# 性能优化
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target
