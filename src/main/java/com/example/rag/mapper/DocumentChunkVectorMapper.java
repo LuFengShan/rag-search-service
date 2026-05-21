@@ -22,18 +22,22 @@ public interface DocumentChunkVectorMapper extends BaseMapper<DocumentChunk> {
 
     List<DocumentChunk> findNearest(@Param("queryVector") String queryVector,
                                    @Param("documentId") UUID documentId,
+                                   @Param("knowledgeBaseId") UUID knowledgeBaseId,
                                    @Param("limit") int limit);
 
     List<DocumentChunk> findNearestL2(@Param("queryVector") String queryVector,
                                       @Param("documentId") UUID documentId,
+                                      @Param("knowledgeBaseId") UUID knowledgeBaseId,
                                       @Param("limit") int limit);
 
     List<DocumentChunk> findByCosineSimilarity(@Param("queryVector") String queryVector,
                                                @Param("documentId") UUID documentId,
+                                               @Param("knowledgeBaseId") UUID knowledgeBaseId,
                                                @Param("limit") int limit);
 
     List<DocumentChunk> findByNegativeInnerProduct(@Param("queryVector") String queryVector,
                                                     @Param("documentId") UUID documentId,
+                                                    @Param("knowledgeBaseId") UUID knowledgeBaseId,
                                                     @Param("limit") int limit);
 
     List<DocumentChunk> findByDocumentIdOrderByChunkIndex(@Param("documentId") UUID documentId);

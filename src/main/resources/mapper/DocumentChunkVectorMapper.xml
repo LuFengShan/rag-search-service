@@ -7,12 +7,13 @@
                dv.embedding &lt;-&gt; CAST(#{queryVector} AS vector) AS distance
         FROM document_chunk dc
         LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        LEFT JOIN documents d ON dc.document_id = d.id
         <where>
-            <if test="documentId != null">
-                dc.document_id = #{documentId}
+            <if test="knowledgeBaseId != null">
+                d.knowledge_base_id = #{knowledgeBaseId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
-            <if test="documentId == null">
-                1=1
+            <if test="documentId != null">
+                AND dc.document_id = #{documentId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
         </where>
         ORDER BY distance
@@ -24,12 +25,13 @@
                dv.embedding &lt;#&gt; CAST(#{queryVector} AS vector) AS distance
         FROM document_chunk dc
         LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        LEFT JOIN documents d ON dc.document_id = d.id
         <where>
-            <if test="documentId != null">
-                dc.document_id = #{documentId}
+            <if test="knowledgeBaseId != null">
+                d.knowledge_base_id = #{knowledgeBaseId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
-            <if test="documentId == null">
-                1=1
+            <if test="documentId != null">
+                AND dc.document_id = #{documentId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
         </where>
         ORDER BY distance
@@ -41,12 +43,13 @@
                1 - (dv.embedding &lt;=&gt; CAST(#{queryVector} AS vector)) AS similarity
         FROM document_chunk dc
         LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        LEFT JOIN documents d ON dc.document_id = d.id
         <where>
-            <if test="documentId != null">
-                dc.document_id = #{documentId}
+            <if test="knowledgeBaseId != null">
+                d.knowledge_base_id = #{knowledgeBaseId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
-            <if test="documentId == null">
-                1=1
+            <if test="documentId != null">
+                AND dc.document_id = #{documentId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
         </where>
         ORDER BY similarity DESC
@@ -58,12 +61,13 @@
                dv.embedding &lt;@&gt; CAST(#{queryVector} AS vector) AS distance
         FROM document_chunk dc
         LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
+        LEFT JOIN documents d ON dc.document_id = d.id
         <where>
-            <if test="documentId != null">
-                dc.document_id = #{documentId}
+            <if test="knowledgeBaseId != null">
+                d.knowledge_base_id = #{knowledgeBaseId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
-            <if test="documentId == null">
-                1=1
+            <if test="documentId != null">
+                AND dc.document_id = #{documentId, typeHandler=com.example.rag.config.UUIDTypeHandler}
             </if>
         </where>
         ORDER BY distance
@@ -74,7 +78,7 @@
         SELECT dc.id, dc.document_id, dc.chunk_index, dc.content, dv.embedding, dc.created_at
         FROM document_chunk dc
         LEFT JOIN document_chunk_vector dv ON dc.id = dv.id
-        WHERE dc.document_id = #{documentId}
+        WHERE dc.document_id = #{documentId, typeHandler=com.example.rag.config.UUIDTypeHandler}
         ORDER BY chunk_index
     </select>
 

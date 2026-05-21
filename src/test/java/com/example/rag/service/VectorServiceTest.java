@@ -2,24 +2,62 @@ package com.example.rag.service;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.embedding.EmbeddingRequest;
+import org.springframework.ai.embedding.EmbeddingResponse;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * 向量服务测试
- *
- * 测试 VectorService 的向量生成和管理功能
- */
 class VectorServiceTest {
+
+    private static final int VECTOR_DIMENSION = 1536;
+
+    private VectorService createVectorService() {
+        EmbeddingModel mockModel = new EmbeddingModel() {
+            @Override
+            public float[] embed(String text) {
+                float[] embedding = new float[VECTOR_DIMENSION];
+                int hash = text != null ? text.hashCode() : 0;
+                for (int i = 0; i < VECTOR_DIMENSION; i++) {
+                    embedding[i] = (float) (Math.sin(i * hash * 0.01) * 0.5 + 0.5);
+                }
+                return embedding;
+            }
+
+            @Override
+            public float[] embed(Document document) {
+                return embed(document.getText());
+            }
+
+            @Override
+            public EmbeddingResponse embedForResponse(List<String> texts) {
+                return null;
+            }
+
+            @Override
+            public EmbeddingResponse call(EmbeddingRequest request) {
+                return null;
+            }
+
+            @Override
+            public int dimensions() {
+                return VECTOR_DIMENSION;
+            }
+        };
+        return new VectorService(null, null, mockModel);
+    }
 
     // ==================== 向量生成测试 ====================
 
     @Test
     @DisplayName("测试生成向量维度")
-    void testGenerateMockEmbedding_Dimension() {
+    void testEmbed_Dimension() {
         VectorService vectorService = createVectorService();
         String text = "测试文本";
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length, "向量维度应该是1536");
@@ -27,18 +65,17 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试相同文本生成相同向量")
-    void testGenerateMockEmbedding_Deterministic() {
+    void testEmbed_Deterministic() {
         VectorService vectorService = createVectorService();
         String text = "相同的测试文本";
 
-        float[] embedding1 = vectorService.generateMockEmbedding(text);
-        float[] embedding2 = vectorService.generateMockEmbedding(text);
+        float[] embedding1 = vectorService.embed(text);
+        float[] embedding2 = vectorService.embed(text);
 
         assertNotNull(embedding1);
         assertNotNull(embedding2);
         assertEquals(embedding1.length, embedding2.length);
 
-        // 验证向量完全相同
         for (int i = 0; i < embedding1.length; i++) {
             assertEquals(embedding1[i], embedding2[i], 0.0001f,
                 "相同文本应该生成相同的向量");
@@ -47,18 +84,17 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试不同文本生成不同向量")
-    void testGenerateMockEmbedding_DifferentTexts() {
+    void testEmbed_DifferentTexts() {
         VectorService vectorService = createVectorService();
         String text1 = "第一个测试文本";
         String text2 = "第二个测试文本";
 
-        float[] embedding1 = vectorService.generateMockEmbedding(text1);
-        float[] embedding2 = vectorService.generateMockEmbedding(text2);
+        float[] embedding1 = vectorService.embed(text1);
+        float[] embedding2 = vectorService.embed(text2);
 
         assertNotNull(embedding1);
         assertNotNull(embedding2);
 
-        // 验证向量不完全相同
         boolean areDifferent = false;
         for (int i = 0; i < Math.min(embedding1.length, 100); i++) {
             if (Math.abs(embedding1[i] - embedding2[i]) > 0.01f) {
@@ -71,11 +107,11 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试向量值范围")
-    void testGenerateMockEmbedding_ValueRange() {
+    void testEmbed_ValueRange() {
         VectorService vectorService = createVectorService();
         String text = "测试文本内容";
 
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         for (int i = 0; i < embedding.length; i++) {
             assertTrue(embedding[i] >= 0.0f && embedding[i] <= 1.0f,
@@ -85,11 +121,11 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试空文本生成向量")
-    void testGenerateMockEmbedding_EmptyText() {
+    void testEmbed_EmptyText() {
         VectorService vectorService = createVectorService();
         String text = "";
 
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length);
@@ -97,7 +133,7 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试长文本生成向量")
-    void testGenerateMockEmbedding_LongText() {
+    void testEmbed_LongText() {
         VectorService vectorService = createVectorService();
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < 1000; i++) {
@@ -105,7 +141,7 @@ class VectorServiceTest {
         }
         String text = sb.toString();
 
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length);
@@ -113,11 +149,11 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试特殊字符文本生成向量")
-    void testGenerateMockEmbedding_SpecialCharacters() {
+    void testEmbed_SpecialCharacters() {
         VectorService vectorService = createVectorService();
         String text = "!@#$%^&*()_+-=[]{}|;':\",./<>?`~\n\t\r";
 
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length);
@@ -125,11 +161,11 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试中英文混合文本生成向量")
-    void testGenerateMockEmbedding_MixedLanguages() {
+    void testEmbed_MixedLanguages() {
         VectorService vectorService = createVectorService();
         String text = "Hello World！你好世界！123";
 
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length);
@@ -209,10 +245,9 @@ class VectorServiceTest {
     void testCosineSimilarity_IdenticalVectors() {
         VectorService vectorService = createVectorService();
         String text = "测试文本";
-        float[] embedding1 = vectorService.generateMockEmbedding(text);
-        float[] embedding2 = vectorService.generateMockEmbedding(text);
+        float[] embedding1 = vectorService.embed(text);
+        float[] embedding2 = vectorService.embed(text);
 
-        // 计算余弦相似度
         double dotProduct = 0;
         double norm1 = 0;
         double norm2 = 0;
@@ -232,10 +267,9 @@ class VectorServiceTest {
     @DisplayName("测试不同文本的相似度差异")
     void testCosineSimilarity_DifferentTexts() {
         VectorService vectorService = createVectorService();
-        float[] embedding1 = vectorService.generateMockEmbedding("文本一");
-        float[] embedding2 = vectorService.generateMockEmbedding("文本二");
+        float[] embedding1 = vectorService.embed("文本一");
+        float[] embedding2 = vectorService.embed("文本二");
 
-        // 计算余弦相似度
         double dotProduct = 0;
         double norm1 = 0;
         double norm2 = 0;
@@ -248,7 +282,6 @@ class VectorServiceTest {
 
         double similarity = dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2));
 
-        // 相似度应该小于1但大于0
         assertTrue(similarity > 0 && similarity <= 1,
             "不同文本的相似度应该在(0, 1]范围内");
     }
@@ -257,9 +290,9 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试null文本")
-    void testGenerateMockEmbedding_NullText() {
+    void testEmbed_NullText() {
         VectorService vectorService = createVectorService();
-        float[] embedding = vectorService.generateMockEmbedding(null);
+        float[] embedding = vectorService.embed(null);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length);
@@ -267,11 +300,11 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试emoji和特殊Unicode")
-    void testGenerateMockEmbedding_Emoji() {
+    void testEmbed_Emoji() {
         VectorService vectorService = createVectorService();
         String text = "😀🎉💻🚀";
 
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length);
@@ -279,7 +312,7 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试非常长的文本")
-    void testGenerateMockEmbedding_VeryLongText() {
+    void testEmbed_VeryLongText() {
         VectorService vectorService = createVectorService();
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < 10000; i++) {
@@ -287,7 +320,7 @@ class VectorServiceTest {
         }
         String text = sb.toString();
 
-        float[] embedding = vectorService.generateMockEmbedding(text);
+        float[] embedding = vectorService.embed(text);
 
         assertNotNull(embedding);
         assertEquals(1536, embedding.length);
@@ -297,37 +330,19 @@ class VectorServiceTest {
 
     @Test
     @DisplayName("测试批量生成向量性能")
-    void testGenerateMockEmbedding_BatchPerformance() {
+    void testEmbed_BatchPerformance() {
         VectorService vectorService = createVectorService();
         long startTime = System.currentTimeMillis();
 
         for (int i = 0; i < 100; i++) {
             String text = "批量测试文本" + i;
-            vectorService.generateMockEmbedding(text);
+            vectorService.embed(text);
         }
 
         long endTime = System.currentTimeMillis();
         long duration = endTime - startTime;
 
-        // 100次向量生成应该在合理时间内完成
         assertTrue(duration < 5000,
             "100次向量生成应该在5秒内完成，实际: " + duration + "ms");
-    }
-
-    // ==================== 辅助方法 ====================
-
-    /**
-     * 创建VectorService实例
-     * 由于VectorService的构造函数是private的，这里使用反射创建
-     */
-    private VectorService createVectorService() {
-        try {
-            java.lang.reflect.Constructor<VectorService> constructor =
-                VectorService.class.getDeclaredConstructor();
-            constructor.setAccessible(true);
-            return constructor.newInstance();
-        } catch (Exception e) {
-            throw new RuntimeException("无法创建VectorService实例", e);
-        }
     }
 }

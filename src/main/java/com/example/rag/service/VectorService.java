@@ -5,6 +5,7 @@ import com.example.rag.mapper.DocumentChunkMapper;
 import com.example.rag.mapper.DocumentChunkVectorMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,6 +19,7 @@ public class VectorService {
 
     private final DocumentChunkMapper documentChunkMapper;
     private final DocumentChunkVectorMapper documentChunkVectorMapper;
+    private final EmbeddingModel embeddingModel;
 
     private static final int VECTOR_DIMENSION = 1536;
 
@@ -36,19 +38,19 @@ public class VectorService {
         log.debug("Saved document chunk: documentId={}, chunkIndex={}", documentId, chunkIndex);
     }
 
-    public List<DocumentChunk> searchByCosineSimilarity(float[] queryEmbedding, UUID documentId, int limit) {
+    public List<DocumentChunk> searchByCosineSimilarity(float[] queryEmbedding, UUID knowledgeBaseId, int limit) {
         String vectorString = arrayToString(queryEmbedding);
-        return documentChunkVectorMapper.findByCosineSimilarity(vectorString, documentId, limit);
+        return documentChunkVectorMapper.findByCosineSimilarity(vectorString, null, knowledgeBaseId, limit);
     }
 
-    public List<DocumentChunk> searchByL2Distance(float[] queryEmbedding, UUID documentId, int limit) {
+    public List<DocumentChunk> searchByL2Distance(float[] queryEmbedding, UUID knowledgeBaseId, int limit) {
         String vectorString = arrayToString(queryEmbedding);
-        return documentChunkVectorMapper.findNearestL2(vectorString, documentId, limit);
+        return documentChunkVectorMapper.findNearestL2(vectorString, null, knowledgeBaseId, limit);
     }
 
-    public List<DocumentChunk> searchByInnerProduct(float[] queryEmbedding, UUID documentId, int limit) {
+    public List<DocumentChunk> searchByInnerProduct(float[] queryEmbedding, UUID knowledgeBaseId, int limit) {
         String vectorString = arrayToString(queryEmbedding);
-        return documentChunkVectorMapper.findByNegativeInnerProduct(vectorString, documentId, limit);
+        return documentChunkVectorMapper.findByNegativeInnerProduct(vectorString, null, knowledgeBaseId, limit);
     }
 
     public void deleteByDocumentId(UUID documentId) {
@@ -72,7 +74,18 @@ public class VectorService {
         return sb.toString();
     }
 
-    public float[] generateMockEmbedding(String text) {
+    public float[] embed(String text) {
+        try {
+            float[] result = embeddingModel.embed(text);
+            log.debug("Generated embedding via Alibaba text-embedding-v4, dimension={}", result.length);
+            return result;
+        } catch (Exception e) {
+            log.warn("Embedding API failed, using fallback mock embedding: {}", e.getMessage());
+            return generateFallbackEmbedding(text);
+        }
+    }
+
+    private float[] generateFallbackEmbedding(String text) {
         float[] embedding = new float[VECTOR_DIMENSION];
         int hash = text != null ? text.hashCode() : 0;
         for (int i = 0; i < VECTOR_DIMENSION; i++) {

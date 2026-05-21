@@ -1,4 +1,4 @@
-
+# yaml-language-server: $schema=https://json.schemastore.org/spring-boot.json
 server:
   port: 8080
 
@@ -15,11 +15,28 @@ spring:
       port: 6379
       password:
 
+  ai:
+    openai:
+      api-key: xxxxx
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-chat
+          temperature: 0.7
+      embedding:
+        enabled: false
+
   servlet:
     multipart:
       enabled: true
       max-file-size: 50MB
       max-request-size: 50MB
+
+dashscope:
+  api-key: xxxx
+  embedding:
+    model: text-embedding-v4
+    dimensions: 1536
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -68,4 +85,3 @@ management:
     web:
       exposure:
         include: health,info,metrics
-
