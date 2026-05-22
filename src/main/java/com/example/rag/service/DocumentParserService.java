@@ -26,15 +26,24 @@ import java.util.zip.ZipInputStream;
 
 /**
  * 文档解析服务
- * 使用 Apache Tika 解析各种格式的文档
+ * <p>
+ * 使用 Apache Tika 解析各种格式的文档，提取文本内容。
+ * 支持的格式包括：
+ * <ul>
+ *   <li>文档：DOC, DOCX, ODT, RTF</li>
+ *   <li>PDF：PDF</li>
+ *   <li>表格：XLS, XLSX, CSV</li>
+ *   <li>演示文稿：PPT, PPTX</li>
+ *   <li>文本：TXT, HTML, XML, Markdown</li>
+ *   <li>其他：JSON, EPUB, Mail</li>
+ * </ul>
  *
- * 支持的格式：
- * - 文档：DOC, DOCX, ODT, RTF
- * - PDF：PDF
- * - 表格：XLS, XLSX, CSV
- * - 演示文稿：PPT, PPTX
- * - 文本：TXT, HTML, XML, Markdown
- * - 其他：JSON, EPUB, Mail
+ * <h3>解析策略</h3>
+ * <ol>
+ *   <li>纯文本格式（.txt, .md, .json等）：直接读取</li>
+ *   <li>其他格式：使用 Tika 自动检测并解析</li>
+ *   <li>Tika 失败时：尝试 ZIP 回退解析（适用于 DOCX/XLSX/EPUB 等 ZIP 格式）</li>
+ * </ol>
  */
 @Slf4j
 @Service
@@ -55,25 +64,28 @@ public class DocumentParserService {
     private static final int DEFAULT_MAX_TEXT_LENGTH = 10 * 1024 * 1024;
 
     /**
-     * 解析文档文件
+     * 解析文档文件（从输入流）
      *
      * @param inputStream 文档输入流
-     * @param filename    文件名（用于自动检测类型）
+     * @param filename 文件名（用于自动检测类型）
      * @return 提取的文本内容
      */
     public String parseDocument(InputStream inputStream, String filename) {
         String extension = getFileExtension(filename).toLowerCase();
 
+        // 纯文本文件直接读取
         if (TEXT_EXTENSIONS.contains(extension)) {
             return parseAsText(inputStream);
         }
 
+        // 其他格式使用 Tika 解析
         return parseWithTika(inputStream, filename);
     }
 
     /**
-     * 解析文档文件（自动重试模式）
-     * 先尝试 Tika 解析，失败时对 ZIP 类格式（epub/docx/xlsx等）使用回退解析
+     * 解析文档文件（从文件路径）
+     * <p>
+     * 采用自动重试模式：先尝试 Tika 解析，失败时对 ZIP 类格式使用回退解析。
      *
      * @param filePath 文件路径
      * @param filename 文件名
@@ -82,6 +94,7 @@ public class DocumentParserService {
     public String parseDocument(String filePath, String filename) {
         String extension = getFileExtension(filename).toLowerCase();
 
+        // 纯文本文件直接读取
         if (TEXT_EXTENSIONS.contains(extension)) {
             try {
                 return parseAsText(Files.newInputStream(Paths.get(filePath)));
@@ -91,6 +104,7 @@ public class DocumentParserService {
             }
         }
 
+        // 尝试 Tika 解析
         try {
             String content = parseWithTika(Files.newInputStream(Paths.get(filePath)), filename);
             if (!content.isEmpty()) {
@@ -100,6 +114,7 @@ public class DocumentParserService {
             log.warn("Primary parsing failed for: {}, trying archive fallback", filename);
         }
 
+        // Tika 失败时使用 ZIP 回退解析
         return parseZipArchiveAsText(filePath);
     }
 
@@ -107,22 +122,26 @@ public class DocumentParserService {
      * 使用 Tika 解析文档
      *
      * @param inputStream 文档输入流
-     * @param filename    文件名
+     * @param filename 文件名
      * @return 提取的文本内容
      */
     private String parseWithTika(InputStream inputStream, String filename) {
         try {
+            // 创建内容处理器（限制最大长度）
             BodyContentHandler handler = new BodyContentHandler(DEFAULT_MAX_TEXT_LENGTH);
 
+            // 设置元数据
             Metadata metadata = new Metadata();
             metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, filename);
 
+            // 解析上下文
             ParseContext context = new ParseContext();
 
+            // 执行解析
             parser.parse(inputStream, handler, metadata, context);
 
+            // 获取解析结果并清理
             String content = handler.toString();
-
             content = cleanText(content);
 
             log.info("Successfully parsed document: {}, extracted {} characters",
@@ -153,8 +172,10 @@ public class DocumentParserService {
     }
 
     /**
-     * 从 ZIP 归档文件（EPUB/DOCX/XLSX等）中提取文本
-     * 遍历归档中的所有条目，读取文本内容文件
+     * 从 ZIP 归档文件中提取文本
+     * <p>
+     * 适用于 DOCX/XLSX/PPTX/EPUB 等基于 ZIP 的格式。
+     * 遍历归档中的所有条目，读取 HTML/XML/TXT 等文本内容文件。
      *
      * @param filePath 文件路径
      * @return 提取的文本内容
@@ -168,6 +189,7 @@ public class DocumentParserService {
                     continue;
                 }
                 String name = entry.getName().toLowerCase();
+                // 只处理文本类文件
                 if (name.endsWith(".html") || name.endsWith(".htm") || name.endsWith(".xhtml")
                         || name.endsWith(".xml") || name.endsWith(".txt")) {
                     try {
@@ -178,6 +200,7 @@ public class DocumentParserService {
                             baos.write(buffer, 0, len);
                         }
                         String text = baos.toString(StandardCharsets.UTF_8);
+                        // 移除 HTML/XML 标签
                         text = text.replaceAll("<[^>]+>", " ");
                         allText.append(text).append("\n");
                     } catch (Exception e) {
@@ -202,7 +225,7 @@ public class DocumentParserService {
      * 检测文档类型（MIME 类型）
      *
      * @param inputStream 文档输入流
-     * @param filename    文件名
+     * @param filename 文件名
      * @return MIME 类型
      */
     public String detectMediaType(InputStream inputStream, String filename) {
@@ -218,7 +241,7 @@ public class DocumentParserService {
      * 提取文档元数据
      *
      * @param inputStream 文档输入流
-     * @param filename    文件名
+     * @param filename 文件名
      * @return 元数据映射
      */
     public Metadata extractMetadata(InputStream inputStream, String filename) {
@@ -240,7 +263,8 @@ public class DocumentParserService {
 
     /**
      * 清理文本内容
-     * 移除多余的空白字符、规范换行符
+     * <p>
+     * 移除多余的空白字符、规范换行符。
      *
      * @param text 原始文本
      * @return 清理后的文本
@@ -253,7 +277,7 @@ public class DocumentParserService {
         // 移除零宽字符和控制字符
         text = text.replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "");
 
-        // 规范化换行符
+        // 规范化换行符（统一为 \n）
         text = text.replaceAll("\\r\\n", "\n");
         text = text.replaceAll("\\r", "\n");
 
@@ -261,7 +285,7 @@ public class DocumentParserService {
         text = text.replaceAll("\\n{3,}", "\n\n");
 
         // 移除行首行尾多余空白
-        text = text.replaceAll("[ \\t]+\n", "\n");
+        text = text.replaceAll("[ \\t]+\\n", "\n");
         text = text.replaceAll("\\n[ \\t]+", "\n");
 
         return text.trim();
