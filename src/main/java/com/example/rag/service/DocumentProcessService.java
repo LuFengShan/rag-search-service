@@ -45,6 +45,50 @@ public class DocumentProcessService {
     private final DocumentParserService documentParserService;
 
     /**
+     * Markdown 章节分块策略
+     * 保持 frontmatter 和 ## 标题章节的结构完整性
+     */
+    private List<String> markdownSectionChunk(String content) {
+        List<String> chunks = new ArrayList<>();
+        String body = content;
+
+        if (content.startsWith("---")) {
+            int endIdx = content.indexOf("---", 3);
+            if (endIdx >= 0) {
+                String frontmatter = content.substring(0, endIdx + 3).trim();
+                body = content.substring(endIdx + 3).trim();
+                if (frontmatter.length() >= 30 && frontmatter.length() <= 500) {
+                    chunks.add(frontmatter);
+                } else if (frontmatter.length() > 500) {
+                    chunks.add(frontmatter.substring(0, 500));
+                }
+            }
+        }
+
+        String[] sections = body.split("(?=\\n##\\s)");
+        for (String section : sections) {
+            section = section.trim();
+            if (section.isEmpty()) continue;
+
+            if (section.length() <= 500) {
+                chunks.add(section);
+            } else {
+                String[] subsections = section.split("(?=\\n###\\s)");
+                for (String sub : subsections) {
+                    sub = sub.trim();
+                    if (sub.isEmpty()) continue;
+                    if (sub.length() <= 500) {
+                        chunks.add(sub);
+                    } else {
+                        chunks.addAll(smartChunkContent(sub));
+                    }
+                }
+            }
+        }
+        return chunks;
+    }
+
+    /**
      * 异步处理文档：解析内容 → 智能分块 → 向量化并入库
      * <p>
      * 通过 {@code @Async("documentProcessExecutor")} 注解，
@@ -81,8 +125,13 @@ public class DocumentProcessService {
             }
 
             // ===== 阶段 3：智能分块（Chunking） =====
-            // 将长文本按段落切分成大小适中的片段，每个片段作为一个检索单元
-            List<String> chunks = smartChunkContent(content);
+            // MD 文档使用章节分块策略，保持结构完整性
+            List<String> chunks;
+            if ("md".equalsIgnoreCase(document.getFileType()) || "markdown".equalsIgnoreCase(document.getFileType())) {
+                chunks = markdownSectionChunk(content);
+            } else {
+                chunks = smartChunkContent(content);
+            }
 
             // ===== 阶段 4：向量化并入库 =====
             // 遍历每个分块，调用 Embedding 模型生成向量，存入 pgvector

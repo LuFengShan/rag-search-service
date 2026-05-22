@@ -3,9 +3,11 @@ package com.example.rag.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.example.rag.document.MarkdownFrontmatterExtractor;
 import com.example.rag.dto.response.DocumentResponse;
 import com.example.rag.dto.response.PagedResponse;
 import com.example.rag.entity.Document;
+import com.example.rag.entity.KnowledgeBase;
 import com.example.rag.exception.BusinessException;
 import com.example.rag.exception.ResourceNotFoundException;
 import com.example.rag.mapper.DocumentMapper;
@@ -28,26 +30,24 @@ import java.util.UUID;
 public class DocumentService {
 
     private final DocumentMapper documentMapper;
-
     private final KnowledgeBaseMapper knowledgeBaseMapper;
-
     private final VectorService vectorService;
-
     private final DocumentParserService documentParserService;
-
     private final DocumentProcessService documentProcessService;
-
     private static final String UPLOAD_DIR = "./uploads/documents/";
 
     @Transactional
     public DocumentResponse uploadDocument(MultipartFile file, UUID knowledgeBaseId, UUID userId) throws IOException {
-        if (knowledgeBaseMapper.selectById(knowledgeBaseId) == null) {
+        KnowledgeBase kb = knowledgeBaseMapper.selectById(knowledgeBaseId);
+        if (kb == null) {
             throw new ResourceNotFoundException("知识库", "id", knowledgeBaseId.toString());
         }
 
         String originalFilename = file.getOriginalFilename();
-        if (!documentParserService.isSupported(originalFilename)) {
-            throw new BusinessException("不支持的文件格式");
+        String fileExtension = getFileExtension(originalFilename);
+
+        if (!isFormatAllowed(kb, fileExtension)) {
+            throw new BusinessException("此知识库仅允许上传 " + getKbAllowedFormats(kb) + " 格式的文件");
         }
 
         Path uploadPath = Paths.get(UPLOAD_DIR);
@@ -55,10 +55,8 @@ public class DocumentService {
             Files.createDirectories(uploadPath);
         }
 
-        String fileExtension = getFileExtension(originalFilename);
         String storedFilename = UUID.randomUUID().toString() + "." + fileExtension;
         Path filePath = uploadPath.resolve(storedFilename);
-
         Files.copy(file.getInputStream(), filePath);
 
         Document document = Document.builder()
@@ -73,10 +71,27 @@ public class DocumentService {
                 .build();
 
         documentMapper.insert(document);
-
         documentProcessService.processDocument(document);
-
         return DocumentResponse.fromEntity(document);
+    }
+
+    private boolean isFormatAllowed(KnowledgeBase kb, String fileExtension) {
+        String config = kb.getConfig();
+        if (config != null && config.contains("\"docType\":\"CAR_MD\"")) {
+            return "md".equalsIgnoreCase(fileExtension) || "markdown".equalsIgnoreCase(fileExtension);
+        }
+        return documentParserService.isSupported(originalFilename(fileExtension));
+    }
+
+    private String getKbAllowedFormats(KnowledgeBase kb) {
+        if (kb.getConfig() != null && kb.getConfig().contains("\"docType\":\"CAR_MD\"")) {
+            return "Markdown (.md)";
+        }
+        return "PDF/Word/PPT/TXT 等";
+    }
+
+    private String originalFilename(String extension) {
+        return "file." + extension;
     }
 
     public PagedResponse<DocumentResponse> getDocuments(int page, int pageSize, UUID knowledgeBaseId, String search) {
@@ -114,7 +129,6 @@ public class DocumentService {
         if (document == null) {
             throw new ResourceNotFoundException("文档", "id", id.toString());
         }
-
         DocumentResponse response = DocumentResponse.fromEntity(document);
         long chunkCount = vectorService.countByDocumentId(id);
         response.setChunkCount((int) chunkCount);
@@ -127,22 +141,17 @@ public class DocumentService {
         if (document == null) {
             throw new ResourceNotFoundException("文档", "id", id.toString());
         }
-
         try {
-            Path filePath = Paths.get(document.getFilePath());
-            Files.deleteIfExists(filePath);
+            Files.deleteIfExists(Paths.get(document.getFilePath()));
         } catch (IOException e) {
             log.warn("Failed to delete file: {}", document.getFilePath());
         }
-
         vectorService.deleteByDocumentId(id);
         documentMapper.deleteById(id);
     }
 
     private String getFileExtension(String filename) {
-        if (filename == null || !filename.contains(".")) {
-            return "bin";
-        }
+        if (filename == null || !filename.contains(".")) return "bin";
         return filename.substring(filename.lastIndexOf(".") + 1).toLowerCase();
     }
 }

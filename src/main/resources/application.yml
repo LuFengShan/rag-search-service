@@ -54,7 +54,8 @@ mybatis-plus:
 
 jwt:
   secret: your-256-bit-secret-key-here-must-be-at-least-32-characters
-  expiration: 86400000
+  expiration: 1800000
+  refresh-expiration: 604800000
 
 springdoc:
   api-docs:

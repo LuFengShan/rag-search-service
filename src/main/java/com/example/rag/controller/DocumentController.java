@@ -7,6 +7,7 @@ import com.example.rag.service.DocumentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -14,6 +15,10 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.UUID;
 
 @RestController
@@ -24,6 +29,24 @@ import java.util.UUID;
 public class DocumentController extends BaseController {
 
     private final DocumentService documentService;
+
+    private static final String TEMPLATE_PATH = "./docs/车系MD模板示例-比亚迪秦PLUS.md";
+
+    @GetMapping("/template")
+    @Operation(summary = "下载车系MD模板", description = "下载卖车知识库的Markdown模板文件")
+    public ResponseEntity<byte[]> downloadTemplate() throws IOException {
+        Path path = Paths.get(TEMPLATE_PATH);
+        if (!Files.exists(path)) {
+            return ResponseEntity.notFound().build();
+        }
+        byte[] content = Files.readAllBytes(path);
+        String filename = "车系MD模板-比亚迪秦PLUS.md";
+        String encodedFilename = new String(filename.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + encodedFilename + "\"")
+                .contentType(MediaType.parseMediaType("text/markdown"))
+                .body(content);
+    }
 
     @PostMapping(value="/upload",consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "上传文档", description = "上传文档到指定知识库")

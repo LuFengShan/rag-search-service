@@ -2,20 +2,16 @@ package com.example.rag.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.util.UUID;
-
 @Data
+@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class QuestionRequest {
+public class RefreshTokenRequest {
 
-    @NotBlank(message = "问题不能为空")
-    private String question;
-
-    private UUID knowledgeBaseId;
-
-    private UUID sessionId;
+    @NotBlank(message = "刷新令牌不能为空")
+    private String refreshToken;
 }

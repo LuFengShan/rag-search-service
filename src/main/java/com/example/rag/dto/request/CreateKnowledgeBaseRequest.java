@@ -1,4 +1,3 @@
-
 package com.example.rag.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
@@ -19,4 +18,6 @@ public class CreateKnowledgeBaseRequest {
     private String embeddingModel;
 
     private String config;
+
+    private String docType;
 }

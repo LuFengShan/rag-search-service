@@ -22,6 +22,9 @@ public class Question {
     @TableField("user_id")
     private UUID userId;
 
+    @TableField("session_id")
+    private UUID sessionId;
+
     @TableField("question")
     private String question;
 

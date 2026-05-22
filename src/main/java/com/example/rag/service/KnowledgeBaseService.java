@@ -21,12 +21,21 @@ public class KnowledgeBaseService {
 
     @Transactional
     public KnowledgeBaseResponse createKnowledgeBase(CreateKnowledgeBaseRequest request, UUID userId) {
+        String config = request.getConfig();
+        if (config == null || config.isEmpty()) {
+            if ("CAR_MD".equals(request.getDocType())) {
+                config = "{\"docType\":\"CAR_MD\"}";
+            } else {
+                config = "{}";
+            }
+        }
+
         KnowledgeBase knowledgeBase = KnowledgeBase.builder()
                 .id(UUID.randomUUID())
                 .name(request.getName())
                 .description(request.getDescription())
                 .embeddingModel(request.getEmbeddingModel())
-                .config(request.getConfig())
+                .config(config)
                 .createdBy(userId)
                 .build();
 

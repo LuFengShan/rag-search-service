@@ -15,6 +15,7 @@ import com.example.rag.exception.ResourceNotFoundException;
 import com.example.rag.mapper.UserMapper;
 import com.example.rag.security.JwtTokenProvider;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -22,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.UUID;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class UserService {
@@ -31,6 +33,8 @@ public class UserService {
     private final PasswordEncoder passwordEncoder;
 
     private final JwtTokenProvider jwtTokenProvider;
+
+    private final RefreshTokenService refreshTokenService;
 
     @Transactional
     public UserResponse createUser(CreateUserRequest request) {
@@ -61,10 +65,15 @@ public class UserService {
             throw new BadCredentialsException("用户名或密码错误");
         }
 
-        String token = jwtTokenProvider.generateToken(user.getId().toString(), user.getUsername(), user.getRole().name());
+        String accessToken = jwtTokenProvider.generateAccessToken(user.getId().toString(), user.getUsername(), user.getRole().name());
+        String refreshToken = jwtTokenProvider.generateRefreshToken(user.getId().toString());
+        
+        refreshTokenService.saveRefreshToken(user.getId().toString(), refreshToken);
+        log.info("User logged in successfully: {}", user.getUsername());
 
         return LoginResponse.builder()
-                .token(token)
+                .token(accessToken)
+                .refreshToken(refreshToken)
                 .userId(user.getId())
                 .username(user.getUsername())
                 .email(user.getEmail())

@@ -5,23 +5,16 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class LoginResponse {
-
-    private String token;
-
-    private String refreshToken;
-
-    private UUID userId;
-
-    private String username;
-
-    private String email;
-
-    private String role;
+public class ConversationSession {
+    private UUID sessionId;
+    private String title;
+    private int messageCount;
+    private LocalDateTime lastMessageAt;
 }

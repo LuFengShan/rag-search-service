@@ -1,9 +1,7 @@
 package com.example.rag.controller;
 
 import com.example.rag.dto.request.QuestionRequest;
-import com.example.rag.dto.response.AnswerResponse;
-import com.example.rag.dto.response.ApiResponse;
-import com.example.rag.dto.response.PagedResponse;
+import com.example.rag.dto.response.*;
 import com.example.rag.entity.Question;
 import com.example.rag.service.QAService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -14,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -26,13 +25,29 @@ public class QAController extends BaseController {
     private final QAService qaService;
 
     @PostMapping("/question")
-    @Operation(summary = "提问", description = "提交问题获取答案")
+    @Operation(summary = "提问", description = "提交问题获取答案，支持多轮会话")
     public ResponseEntity<ApiResponse<AnswerResponse>> askQuestion(
             @Valid @RequestBody QuestionRequest request) {
         
         UUID userId = getCurrentUserId();
         AnswerResponse response = qaService.askQuestion(request, userId);
         return ResponseEntity.ok(success(response));
+    }
+
+    @GetMapping("/sessions")
+    @Operation(summary = "获取会话列表", description = "获取当前用户的所有对话会话")
+    public ResponseEntity<ApiResponse<List<ConversationSession>>> getSessions() {
+        UUID userId = getCurrentUserId();
+        List<ConversationSession> sessions = qaService.getSessions(userId);
+        return ResponseEntity.ok(success(sessions));
+    }
+
+    @GetMapping("/sessions/{sessionId}/messages")
+    @Operation(summary = "获取会话消息", description = "获取指定会话的所有问答消息")
+    public ResponseEntity<ApiResponse<List<ConversationMessage>>> getSessionMessages(
+            @PathVariable UUID sessionId) {
+        List<ConversationMessage> messages = qaService.getSessionMessages(sessionId);
+        return ResponseEntity.ok(success(messages));
     }
 
     @GetMapping("/history")

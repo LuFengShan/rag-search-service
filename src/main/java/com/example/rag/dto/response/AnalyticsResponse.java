@@ -16,6 +16,8 @@ public class AnalyticsResponse {
 
     private long totalQuestions;
 
+    private long todayQuestions;
+
     private double avgResponseTime;
 
     private double satisfactionRate;
