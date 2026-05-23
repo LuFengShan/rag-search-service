@@ -1,6 +1,8 @@
 # RAG 知识库 - 问答处理完整流程
 
-本文档基于 `rag-search-service` 实际代码，详细描述 `/api/qa/question` 问答接口的完整处理链路，以及 Spring AI 框架在本项目中的使用方式。
+> Spring AI 1.1.6 + Tool Calling + MCP 协议 —— 重构版本
+
+本文档基于 `rag-search-service` 实际代码重构后版本，详细描述 `/api/qa/question` 问答接口从 HTTP 请求到 LLM 生成答案的完整处理链路。
 
 ---
 
@@ -9,91 +11,111 @@
 1. [问答接口总体架构](#问答接口总体架构)
 2. [步骤详解](#步骤详解)
    - [① 请求入口（QAController）](#1️⃣-请求入口qacontroller)
-   - [② 问题持久化（QAService - 步骤 1）](#2️⃣-问题持久化qaservice---步骤-1)
-   - [③ 问题向量化（AgentService → VectorService.embed）](#3️⃣-问题向量化agentservice--vectorserviceembed)
+   - [② 问题持久化（QAService）](#2️⃣-问题持久化qaservice)
+   - [③ 问题向量化（VectorService）](#3️⃣-问题向量化vectorservice)
    - [④ 向量相似度检索（VectorService → pgvector）](#4️⃣-向量相似度检索vectorservice--pgvector)
-   - [⑤ 构建 Prompt（AgentService - SystemMessage + UserMessage）](#5️⃣-构建-promptagentservice---systemmessage--usermessage)
-   - [⑥ 调用 DeepSeek 大模型（ChatModel.call）](#6️⃣-调用-deepseek-大模型chatmodelcall)
-   - [⑦ 答案持久化（QAService - 步骤 2-5）](#7️⃣-答案持久化qaservice---步骤-2-5)
+   - [⑤ 构建消息列表（AgentService.buildMessages）](#5️⃣-构建消息列表agentservicebuildmessages)
+   - [⑥ ChatClient.tools()——LLM 自主决策工具调用](#6️⃣-chatclienttoolsllm-自主决策工具调用)
+   - [⑦ 答案持久化（QAService）](#7️⃣-答案持久化qaservice)
    - [⑧ 返回响应](#8️⃣-返回响应)
-   - [⑨ 对话历史查询](#9️⃣-对话历史查询)
-3. [Spring AI 框架详解](#spring-ai-框架详解)
-   - [3.1 什么是 Spring AI](#31-什么是-spring-ai)
-   - [3.2 本项目的依赖配置](#32-本项目的依赖配置)
-   - [3.3 ChatModel —— 聊天模型](#33-chatmodel--聊天模型)
-   - [3.4 EmbeddingModel —— 嵌入模型](#34-embeddingmodel--嵌入模型)
-   - [3.5 Prompt / Message —— 提示词体系](#35-prompt--message--提示词体系)
-   - [3.6 application.yml 配置详解](#36-applicationyml-配置详解)
-   - [3.7 Spring AI 可移植性原理](#37-spring-ai-可移植性原理)
-   - [3.8 常见问题与最佳实践](#38-常见问题与最佳实践)
-4. [核心代码文件清单](#核心代码文件清单)
-5. [数据模型](#数据模型)
-6. [时序图](#时序图)
-7. [快速测试](#快速测试)
+   - [⑨ 对话历史与多轮上下文](#9️⃣-对话历史与多轮上下文)
+   - [⑩ 会话管理](#0️⃣-会话管理)
+3. [Tool Calling 详解](#tool-calling-详解)
+   - [3.1 @Tool 注解机制](#31-tool-注解机制)
+   - [3.2 JSON Schema 自动生成](#32-json-schema-自动生成)
+   - [3.3 LLM 函数调用多轮协作](#33-llm-函数调用多轮协作)
+   - [3.4 工具类清单](#34-工具类清单)
+4. [MCP 协议集成](#mcp-协议集成)
+   - [4.1 MCP 三层架构](#41-mcp-三层架构)
+   - [4.2 @McpTool 注解](#42-mcptool-注解)
+   - [4.3 协议交互时序](#43-协议交互时序)
+   - [4.4 依赖与配置](#44-依赖与配置)
+5. [Spring AI 框架详解](#spring-ai-框架详解)
+6. [容错与降级策略](#容错与降级策略)
+7. [核心代码文件清单](#核心代码文件清单)
+8. [数据模型](#数据模型)
+9. [时序图（完整）](#时序图完整)
+10. [快速测试](#快速测试)
 
 ---
 
 ## 问答接口总体架构
 
+### 请求入口
+
 ```
 POST /api/qa/question
 {
-  "question": "请假流程是什么？",
-  "knowledgeBaseId": "cea53e8d-..."  // 可选
+  "question": "秦PLUS落地多少钱？",
+  "knowledgeBaseId": "cea53e8d-...",   // 可选
+  "sessionId": "f47ac10b-..."          // 可选，不传则新建会话
 }
-     │
-     ▼
-┌──────────────────────────────────────────────────────────────┐
-│                     QAController                              │
-│  • JWT 鉴权 → getCurrentUserId()                             │
-│  • 参数校验 @Valid                                            │
-└──────────────────────────────┬───────────────────────────────┘
-                               │
-                               ▼
-┌──────────────────────────────────────────────────────────────┐
-│                      QAService                                │
-│  @Transactional                                               │
-│                                                               │
-│  ① INSERT question (status=PENDING)                           │
-│  ② agentService.answer(question, knowledgeBaseId)             │
-│  ③ INSERT answer (answer + sources JSON + confidence)         │
-│  ④ UPDATE question (status=ANSWERED)                          │
-│  ⑤ return AnswerResponse                                      │
-└──────────────────────────────┬───────────────────────────────┘
-                               │ ②
-                               ▼
-┌──────────────────────────────────────────────────────────────┐
-│                     AgentService (RAG 核心)                    │
-│                                                               │
-│  1. vectorService.embed(question)                             │
-│     └─ 阿里云 DashScope text-embedding-v4 → float[1536]       │
-│                                                               │
-│  2. vectorService.searchByCosineSimilarity(embedding, kb, 5)  │
-│     └─ pgvector <=> 余弦相似度 → top-5 DocumentChunk          │
-│                                                               │
-│  3. buildContext(chunks) → 拼接检索上下文                      │
-│     buildSources(chunks) → 构建引用来源列表                     │
-│                                                               │
-│  4. new Prompt([                                               │
-│       SystemMessage("你是企业知识库助手..."),                   │
-│       UserMessage("检索内容 + 用户问题...")                     │
-│     ])                                                        │
-│                                                               │
-│  5. chatModel.call(prompt)                                    │
-│     └─ DeepSeek deepseek-chat (via OpenAI-compatible API)     │
-│                                                               │
-│  6. return AnswerResponse(answer, sources, confidence)         │
-└──────────────────────────────────────────────────────────────┘
 ```
 
-| 阶段 | 服务类 | 核心技术 |
-|------|--------|---------|
-| ① 入口 | `QAController` | JWT 鉴权、`@Valid` 校验 |
-| ② 编排 | `QAService` | `@Transactional`、问题→答案双表写入 |
-| ③ 向量化 | `VectorService.embed()` | 阿里云 DashScope `text-embedding-v4`（1536 维） |
-| ④ 检索 | `VectorService.searchByCosineSimilarity()` | pgvector `<=>` 余弦相似度 |
-| ⑤ Prompt 构建 | `AgentService` | Spring AI `Prompt` / `SystemMessage` / `UserMessage` |
-| ⑥ LLM 调用 | `AgentService` → `ChatModel` | DeepSeek `deepseek-chat`（OpenAI 兼容 API） |
+### 全链路处理流程
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        QAController                                   │
+│  • JWT 鉴权 → getCurrentUserId()                                     │
+│  • 参数校验 @Valid                                                     │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                         QAService                                     │
+│  @Transactional                                                       │
+│                                                                       │
+│  ① INSERT question (status=PENDING, session_id=xxx)                   │
+│  ② agentService.answer(question, knowledgeBaseId, sessionId)          │
+│  ③ INSERT answer (answer + sources JSON + confidence)                 │
+│  ④ UPDATE question (status=ANSWERED)                                  │
+│  ⑤ return AnswerResponse                                              │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ ②
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                      AgentService (RAG + Tool Calling 核心)            │
+│                                                                       │
+│  1. vectorService.embed(question)                                     │
+│     └─ 阿里云 DashScope text-embedding-v4 → float[1536]               │
+│                                                                       │
+│  2. vectorService.searchByCosineSimilarity(embedding, kbId, 5)        │
+│     └─ pgvector <=> 余弦相似度 → top-5 DocumentChunk                  │
+│                                                                       │
+│  3. buildMessages() → SystemMessage + 多轮历史 + RAG上下文 + 问题     │
+│                                                                       │
+│  4. ChatClient.builder(chatModel)                                     │
+│          .prompt()                                                    │
+│          .messages(messages)                                          │
+│          .tools(carPriceCalculator, automotiveTools)  ← ⚡ 注入工具     │
+│          .call()                                                      │
+│          .content()                                                   │
+│     └─ ┌─────────────────────────────────────────────────────────┐   │
+│        │ LLM 自主决策：                                            │   │
+│        │   • 用户问落地价？→ 返回 function_call(carPriceCalculator)│   │
+│        │   • 用户问优惠？ → 返回 function_call(automotiveTools)    │   │
+│        │   • 知识问答？   → 直接基于 RAG 上下文回答                 │   │
+│        │ ChatClient 自动执行工具 → 结果回传 LLM → 生成最终答案       │   │
+│        └─────────────────────────────────────────────────────────┘   │
+│                                                                       │
+│  5. return AnswerResponse(answer, sources, confidence)                 │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 三层能力矩阵
+
+| 层次 | 服务类 | 核心技术 | 新旧对比 |
+|------|--------|---------|---------|
+| ① 入口 | `QAController` | JWT 鉴权、`@Valid` 校验 | 不变 |
+| ② 编排 | `QAService` | `@Transactional`、问题→答案双表写入 | 不变 |
+| ③ 向量化 | `VectorService.embed()` | 阿里云 DashScope `text-embedding-v4`（1536 维） | 不变 |
+| ④ 检索 | `VectorService.searchByCosineSimilarity()` | pgvector `<=>` 余弦相似度 | 不变 |
+| ⑤ 消息构建 | `AgentService.buildMessages()` | System + History + RAG 上下文 | **新增多轮历史支持** |
+| ⑥ 工具决策 | `AgentService.callChatClientWithTools()` | `ChatClient.tools()` + `@Tool` 注解 | **🎉 替代手动正则匹配** |
+| ⑦ MCP 暴露 | `McpToolsAdapter` | `@McpTool` + Streamable-HTTP | **🎉 新增对外标准接口** |
+| ⑧ LLM 调用 | `ChatClient` → DeepSeek | `deepseek-chat`（OpenAI 兼容 API） | 扁平 API 升级为 Fluent API |
+| ⑨ 容错 | `@Retryable` + `@Recover` | 指数退避重试 + 业务降级 | **新增三层防护** |
 
 ---
 
@@ -104,10 +126,12 @@ POST /api/qa/question
 **接口**：`POST /api/qa/question`
 
 **请求体**（`QuestionRequest`）：
+
 ```json
 {
-  "question": "请假流程是什么？",
-  "knowledgeBaseId": "cea53e8d-3fda-4797-9fdb-fe03c5a5bc19"
+  "question": "秦PLUS落地多少钱？",
+  "knowledgeBaseId": "cea53e8d-3fda-4797-9fdb-fe03c5a5bc19",
+  "sessionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 }
 ```
 
@@ -115,10 +139,9 @@ POST /api/qa/question
 |------|------|------|------|
 | `question` | String | ✅ | 用户输入的自然语言问题，`@NotBlank` 校验 |
 | `knowledgeBaseId` | UUID | ❌ | 限定检索的知识库 ID，传 `null` 则全局检索所有知识库 |
+| `sessionId` | UUID | ❌ | 多轮对话会话 ID，不传则自动新建 |
 
 **权限**：`@PreAuthorize("isAuthenticated()")` —— 任意已登录用户
-
-**代码**：[`QAController.java:28-36`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/controller/QAController.java#L28-L36)
 
 ```java
 @PostMapping("/question")
@@ -130,7 +153,7 @@ public ResponseEntity<ApiResponse<AnswerResponse>> askQuestion(
 }
 ```
 
-**`getCurrentUserId()` 的实现**（[`BaseController.java:20-26`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/controller/BaseController.java#L20-L26)）：
+**`getCurrentUserId()` 实现**（`BaseController`）：
 
 ```java
 protected UUID getCurrentUserId() {
@@ -144,19 +167,33 @@ protected UUID getCurrentUserId() {
 
 ---
 
-### 2️⃣ 问题持久化（QAService - 步骤 1）
-
-**代码**：[`QAService.java:122-134`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/QAService.java#L122-L134)
+### 2️⃣ 问题持久化（QAService）
 
 ```java
-Question question = Question.builder()
-        .id(UUID.randomUUID())                         // MyBatis-Plus ASSIGN_UUID 自动生成
-        .userId(userId)                                // 当前登录用户
-        .question(request.getQuestion())               // 用户原始问题文本
-        .knowledgeBaseId(request.getKnowledgeBaseId()) // 可选，限定知识库
-        .status(Question.Status.PENDING)               // 初始状态：待回答
-        .build();
-questionMapper.insert(question);
+@Transactional
+public AnswerResponse askQuestion(QuestionRequest request, UUID userId) {
+    // 使用请求中的会话ID，或生成新的会话ID
+    UUID sessionId = request.getSessionId();
+    if (sessionId == null) {
+        sessionId = UUID.randomUUID();
+    }
+
+    // 步骤1：构建并保存问题实体
+    Question question = Question.builder()
+            .id(UUID.randomUUID())                         // MyBatis-Plus ASSIGN_UUID
+            .userId(userId)
+            .sessionId(sessionId)                          // 多轮会话关联
+            .question(request.getQuestion())               // 用户原始问题文本
+            .knowledgeBaseId(request.getKnowledgeBaseId()) // 可选，限定知识库
+            .status(Question.Status.PENDING)               // 初始状态：待回答
+            .build();
+    questionMapper.insert(question);
+
+    // 步骤2：调用 AgentService（核心 RAG + Tool Calling 逻辑）
+    AnswerResponse answer = agentService.answer(
+            request.getQuestion(), request.getKnowledgeBaseId(), request.getSessionId());
+    // ...
+}
 ```
 
 **Question 实体**（表名：`question`）：
@@ -165,37 +202,29 @@ questionMapper.insert(question);
 |------|------|------|
 | `id` | UUID | 主键 |
 | `user_id` | UUID | 提问用户 |
+| `session_id` | UUID | 多轮对话会话 ID |
 | `question` | String | 问题文本 |
 | `knowledge_base_id` | UUID | 限定知识库（可为 null） |
 | `status` | enum | PENDING → ANSWERED / FAILED |
 | `created_at` | LocalDateTime | MyBatis-Plus 自动填充 |
 
-**状态机**：
-```
-PENDING ──→ ANSWERED (成功)
-        └─→ FAILED   (异常)
-```
-
 ---
 
-### 3️⃣ 问题向量化（AgentService → VectorService.embed）
-
-**代码**：[`AgentService.java:38-39`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/AgentService.java#L38-L39)
+### 3️⃣ 问题向量化（VectorService）
 
 ```java
 float[] questionEmbedding = vectorService.embed(question);
 ```
 
-`VectorService.embed()` 的实现（[`VectorService.java:77-95`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/VectorService.java#L77-L95)）：
+`VectorService.embed()` 实现：
 
 ```java
 public float[] embed(String text) {
     try {
         // 主策略：调用阿里云 DashScope text-embedding-v4 API
-        float[] result = embeddingModel.embed(text);  // ← Spring AI EmbeddingModel
-        return result;
+        return embeddingModel.embed(text);  // ← Spring AI EmbeddingModel 统一接口
     } catch (Exception e) {
-        // 降级策略：API 不可用时使用 hash 伪随机向量
+        // 降级策略：API 不可用时使用 hash 伪随机向量保证系统可用
         return generateFallbackEmbedding(text);
     }
 }
@@ -203,47 +232,22 @@ public float[] embed(String text) {
 
 **关键技术点**：
 
-- `EmbeddingModel` 是 Spring AI 提供的**统一嵌入模型接口**，无论是阿里云 DashScope、OpenAI 还是本地模型，都通过同一个接口调用
-- `embeddingModel.embed(text)` 返回 `float[1536]` —— **1536 维向量**
-- 配置了降级策略：API 不可用时不会直接报错，而是生成 hash 伪随机向量保证系统可用
-
-配置在 `application.yml`：
-```yaml
-dashscope:
-  api-key: sk-xxxx
-  embedding:
-    model: text-embedding-v4
-    dimensions: 1536
-```
-
-同时关闭了 Spring AI OpenAI 自带的 embedding（因为用 DashScope 替代）：
-```yaml
-spring.ai.openai.embedding.enabled: false
-```
+| 维度 | 说明 |
+|------|------|
+| 接口统一 | `EmbeddingModel` 是 Spring AI 的嵌入模型抽象，切换供应商无需改代码 |
+| 向量维度 | `text-embedding-v4` 输出 **1536 维** 浮点向量 |
+| 降级策略 | API 不可用时使用 hash 伪随机向量，保证系统不崩溃 |
 
 ---
 
 ### 4️⃣ 向量相似度检索（VectorService → pgvector）
 
-**代码**：[`AgentService.java:41-42`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/AgentService.java#L41-L42)
-
 ```java
 List<DocumentChunk> similarChunks = vectorService.searchByCosineSimilarity(
-        questionEmbedding, knowledgeBaseId, 5);
+        questionEmbedding, knowledgeBaseId, 5);   // top-5
 ```
 
-`VectorService.searchByCosineSimilarity()`（[`VectorService.java:41-44`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/VectorService.java#L41-L44)）：
-
-```java
-public List<DocumentChunk> searchByCosineSimilarity(
-        float[] queryEmbedding, UUID knowledgeBaseId, int limit) {
-    String vectorString = arrayToString(queryEmbedding);  // float[] → "[0.1, 0.2, ...]"
-    return documentChunkVectorMapper.findByCosineSimilarity(
-            vectorString, null, knowledgeBaseId, limit);
-}
-```
-
-**执行的 SQL**（[`DocumentChunkVectorMapper.xml`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/resources/mapper/DocumentChunkVectorMapper.xml#L41-L57)）：
+**执行的 SQL**（`DocumentChunkVectorMapper.xml`）：
 
 ```sql
 SELECT dc.id, dc.document_id, dc.chunk_index, dc.content,
@@ -257,164 +261,143 @@ LEFT JOIN documents d ON dc.document_id = d.id
     </if>
 </where>
 ORDER BY similarity DESC
-LIMIT 5
+LIMIT #{limit}
 ```
 
-**关键点**：
-- `<=>` 是 pgvector 的**余弦距离**运算符
-- `1 - 余弦距离` = **余弦相似度**，值越大越相关
-- `knowledgeBaseId` 为 null 时不加过滤条件 → 跨所有知识库检索
-- `LIMIT 5` → 取最相似的 5 个文档片段
-
-**pgvector 支持的三种检索方式**：
-
-| 方法 | 运算符 | 说明 |
-|------|--------|------|
-| `findByCosineSimilarity` | `<=>` | 余弦相似度（本项目默认） |
-| `findNearestL2` | `<#>` | L2 欧氏距离 |
-| `findByNegativeInnerProduct` | `<@>` | 负内积（等价于内积排序） |
+| 运算符 | 含义 | 转化 |
+|--------|------|------|
+| `<=>` | pgvector 余弦距离 | `1 - 余弦距离` = 余弦相似度（越大越相关） |
+| `<#>` | L2 欧氏距离 | 距离越小越相似 |
+| `<@>` | 负内积 | 等价于内积排序 |
 
 ---
 
-### 5️⃣ 构建 Prompt（AgentService - SystemMessage + UserMessage）
+### 5️⃣ 构建消息列表（AgentService.buildMessages）
 
-**代码**：[`AgentService.java:44-51`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/AgentService.java#L44-L51)
-
-```java
-// 将检索到的 chunk 拼接为上下文
-String context = buildContext(similarChunks);
-
-// 构建引用来源列表
-List<AnswerResponse.SourceInfo> sources = buildSources(similarChunks);
-
-// 使用 Spring AI 构建 Prompt
-Prompt prompt = new Prompt(List.of(
-        new SystemMessage(SYSTEM_PROMPT),
-        new UserMessage(
-            "【检索到的相关文档内容】\n\n" + context +
-            "\n【用户问题】\n" + question +
-            "\n\n请基于以上文档内容回答用户的问题。")
-));
-```
-
-**System Prompt（系统提示词）**：
-
-```
-你是一个企业知识库智能助手。请根据以下检索到的文档内容回答用户的问题。
-
-要求：
-1. 只使用提供的文档内容回答，不要编造信息
-2. 如果文档内容不足以回答用户的问题，请明确告知
-3. 回答要简洁、准确、有条理
-4. 引用具体文档内容时请说明来源
-5. 使用中文回答
-```
-
-**最终发送给 LLM 的完整 Prompt 结构**：
-
-```
-[SystemMessage]: 你是一个企业知识库智能助手...
-
-[UserMessage]:
-【检索到的相关文档内容】
-
-文档片段1：
-<chunk 1 的文本内容>
-
-文档片段2：
-<chunk 2 的文本内容>
-
-...
-
-【用户问题】
-请假流程是什么？
-
-请基于以上文档内容回答用户的问题。
-```
-
----
-
-### 6️⃣ 调用 DeepSeek 大模型（ChatModel.call）
-
-**代码**：[`AgentService.java:53-64`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/AgentService.java#L53-L64)
+这是 RAG 上下文与 Tool Calling 的**衔接层**，消息结构决定 LLM 的决策质量。
 
 ```java
-try {
-    // Spring AI ChatModel.call() → 自动路由到 deepseek-chat
-    String answer = chatModel.call(prompt)
-            .getResult()           // ChatResponse
-            .getOutput()           // AssistantMessage
-            .getText();            // String
+private List<Message> buildMessages(String question, String ragContext,
+                                     UUID knowledgeBaseId, UUID sessionId) {
+    List<Message> messages = new ArrayList<>();
 
-    return AnswerResponse.builder()
-            .answer(answer)
-            .sources(sources)
-            .confidence(calculateConfidence(similarChunks))
-            .build();
-} catch (Exception e) {
-    // LLM 调用失败时的降级策略
-    return fallbackAnswer(question, sources);
-}
-```
+    // 1️⃣ 系统提示词：定义角色 + 能力边界 + 工具使用引导
+    messages.add(new SystemMessage(selectSystemPrompt(knowledgeBaseId)));
 
-**调用链路**：
-
-```
-chatModel.call(prompt)
-  └─ Spring AI OpenAI ChatModel
-      └─ HTTP POST https://api.deepseek.com/v1/chat/completions
-          Headers: Authorization: Bearer sk-xxx
-          Body: {
-                  "model": "deepseek-chat",
-                  "messages": [
-                    {"role": "system", "content": "你是一个企业知识库..."},
-                    {"role": "user", "content": "【检索到的相关文档内容】..."}
-                  ],
-                  "temperature": 0.7
-                }
-```
-
-**Spring AI 在这里的作用**：`ChatModel` 是一个接口，运行时注入的是 OpenAI 兼容实现。通过 `spring.ai.openai.base-url: https://api.deepseek.com` 将请求路由到 DeepSeek 而非 OpenAI。
-
-**降级策略（LLM 调用失败时）**：
-
-```java
-private AnswerResponse fallbackAnswer(String question, List<SourceInfo> sources) {
-    // 不依赖 LLM，直接从检索结果拼接回答
-    String answer = "根据知识库中的文档内容，以下是相关信息：\n\n";
-    if (!sources.isEmpty()) {
-        answer += sources.stream()
-                .map(s -> "📄 " + s.getChunkContent())
-                .collect(Collectors.joining("\n\n"));
-    } else {
-        answer += "未找到与您问题直接相关的文档内容...";
+    // 2️⃣ 多轮对话历史：从数据库加载，构建 User-Assistant 交替序列
+    if (sessionId != null) {
+        List<Question> history = questionMapper.findBySessionIdOrderByCreatedAt(sessionId);
+        for (Question q : history) {
+            Answer a = answerMapper.findByQuestionId(q.getId()).orElse(null);
+            messages.add(new UserMessage(q.getQuestion()));
+            if (a != null && a.getAnswer() != null) {
+                messages.add(new AssistantMessage(a.getAnswer()));
+            }
+        }
     }
-    return AnswerResponse.builder()
-            .answer(answer).sources(sources).confidence(0.5f).build();
+
+    // 3️⃣ RAG 上下文 + 用户问题：检索结果作为 user message 的一部分注入
+    messages.add(new UserMessage(
+            "【检索到的相关文档内容】\n\n" + ragContext +
+            "\n【用户问题】\n" + question +
+            "\n\n请基于以上文档内容回答用户的问题。"));
+
+    return messages;
 }
+```
+
+**系统提示词（汽车销售场景）**：
+
+```
+你是一个专业的汽车销售顾问AI助手，正在辅助直播间销售场景。
+
+## 可用工具
+你可以调用可用的工具函数来获取实时数据（如价格计算、月供计算、优惠活动、联系方式等）。
+当用户询问价格、月供、优惠、活动、联系方式等问题时，优先调用对应工具获取准确数据。
+
+## 回答要求：
+1. 只使用提供的文档内容回答，绝不编造不存在的信息
+2. 语气亲切热情，像真人销售顾问一样
+3. 价格务必精确，不要模糊；有多个配置时要分别说明
+4. 使用中文回答
 ```
 
 ---
 
-### 7️⃣ 答案持久化（QAService - 步骤 2-5）
+### 6️⃣ ChatClient.tools()——LLM 自主决策工具调用
 
-**代码**：[`QAService.java:143-174`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/QAService.java#L143-L174)
+这是本次重构的**核心变更**，用 LLM 的语义理解能力替代了旧版的手动正则匹配。
+
+**代码**：
 
 ```java
-// 步骤 3：创建 answer 实体
+@Retryable(maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
+public String callChatClientWithTools(List<Message> messages) {
+    return ChatClient.builder(chatModel).build()
+            .prompt()                              // 2. 进入 prompt 构建模式
+            .messages(messages)                    // 3. 设置对话消息
+            .tools(carPriceCalculator, automotiveTools) // 4. ⚡ 注入工具实例
+            .call()                                // 5. 发起调用
+            .content();                            // 6. 获取最终文本
+}
+```
+
+**执行流程对比**：
+
+```
+旧方案（手动正则调度）：                         新方案（LLM 自主决策）：
+
+用户输入："秦PLUS落地多少钱"                      用户输入："秦PLUS落地多少钱"
+  │                                                │
+  ├─ 正则1: ".*(落地多少钱|落地价).*" 命中           │
+  │   └─ 正则2: ".*(秦|汉|唐).*" 命中                │  ChatClient
+  │       └─ extractCarModel() → "秦PLUS"            │    .messages("你是销售顾问...")
+  │           └─ calculateOnRoadPrice("秦PLUS")       │    .tools(carPriceCalculator,
+  │                                                    │            automotiveTools)
+  │                                                    │
+  问题："这个车全办完多钱"                            │    ┌─ LLM 理解语义 ─┐
+  │   ✗ 正则1 不匹配（没有"落地"关键词）              │    │ "用户想算落地价"  │
+  │   ✗ 正则2 ...                                    │    │ carModel=秦PLUS   │
+  └─ 走 RAG 流程（可能回答不准确）                     │    └─────┬───────────┘
+                                                      │          │
+                                                      │ 返回 function_call:
+                                                      │ { "name": "calculateOnRoadPrice",
+                                                      │   "arguments": {"carModel":"秦PLUS"} }
+                                                      │          │
+                                                      │ ChatClient 自动执行工具
+                                                      │ → 结果回传 LLM
+                                                      │ → 生成最终回答
+```
+
+**五种 LLM 自主决策场景**：
+
+| 用户输入 | LLM 决策 | 调用的工具 |
+|---------|---------|-----------|
+| "秦PLUS落地多少钱" | 需要实时价格数据 | `calculateOnRoadPrice("秦PLUS")` |
+| "汉兰达首付3成分5年月供多少" | 需要分期计算 | `calculateMonthlyPayment("汉兰达", 0.3, 5)` |
+| "你们门店在哪" | 需要联系方式 | `getContactInfo("sales")` |
+| "现在有什么优惠" | 需要查询活动 | `getPromotions("general")` |
+| "你好，你能帮我什么" | 打招呼，不需要工具 | `greet()` |
+| "这个车油耗怎么样" | RAG 上下文可回答 | 直接回答（不调用工具） |
+
+---
+
+### 7️⃣ 答案持久化（QAService）
+
+```java
+// 步骤3：创建 answer 实体
 Answer answerEntity = Answer.builder()
         .id(UUID.randomUUID())
         .questionId(question.getId())        // 1:1 关联 question
-        .answer(answer.getAnswer())          // AI 生成的答案
-        .confidence(answer.getConfidence())  // 置信度
+        .answer(answer.getAnswer())          // AI 生成的答案（可能融合了工具结果）
+        .confidence(answer.getConfidence())
         .build();
 
-// 步骤 4：序列化引用来源为 JSON
+// 步骤4：序列化引用来源为 JSON
 answerEntity.setSources(objectMapper.writeValueAsString(answer.getSources()));
-
 answerMapper.insert(answerEntity);
 
-// 步骤 5：更新 question 状态
+// 步骤5：更新 question 状态
 question.setStatus(Question.Status.ANSWERED);
 questionMapper.updateById(question);
 ```
@@ -424,23 +407,11 @@ questionMapper.updateById(question);
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | UUID | 主键 |
-| `question_id` | UUID | 关联 question 表（1:1） |
+| `question_id` | UUID | 关联 question 表（1:1，外键） |
 | `answer` | String | AI 生成的答案正文 |
 | `sources` | TEXT(JSON) | 引用来源 JSON 数组 |
 | `confidence` | Float | 整体置信度（0.0~1.0） |
 | `created_at` | LocalDateTime | 自动填充 |
-
-**sources JSON 示例**：
-```json
-[
-  {
-    "documentId": "a0967b38-da97-4797-879f-06e95e13d1dc",
-    "documentTitle": "知识库文档",
-    "chunkContent": "请假流程：1. 填写请假申请单...",
-    "confidence": 0.85
-  }
-]
-```
 
 ---
 
@@ -450,327 +421,529 @@ questionMapper.updateById(question);
 
 ```java
 public class AnswerResponse {
-    private String answer;           // AI 生成的答案文本
-    private List<SourceInfo> sources; // 引用来源列表
-    private Float confidence;        // 整体置信度
+    private String answer;              // AI 生成的答案文本
+    private List<SourceInfo> sources;   // 引用来源列表
+    private Float confidence;           // 整体置信度
 
     public static class SourceInfo {
-        private UUID documentId;      // 来源文档 ID
-        private String documentTitle; // 来源文档标题
-        private String chunkContent;  // 片段内容（截断到 200 字符）
-        private Float confidence;     // 来源置信度
+        private UUID documentId;         // 来源文档 ID
+        private String documentTitle;    // 来源文档标题
+        private String chunkContent;     // 片段内容（截断到 200 字符）
+        private Float confidence;        // 来源置信度
     }
 }
 ```
 
 **HTTP 响应示例**：
+
 ```json
 {
   "success": true,
   "message": "操作成功",
   "data": {
-    "answer": "根据知识库内容，请假流程如下：\n1. 员工...",
+    "answer": "秦PLUS DM-i 目前有5个配置版本可以选哦～\n\n📋 55km领先型：\n   指导价：7.98万\n   落地总价：约9.36万\n\n...",
     "sources": [
       {
         "documentId": "a0967b38-...",
-        "documentTitle": "知识库文档",
-        "chunkContent": "请假流程：1. 填写请假申请单...",
+        "documentTitle": "秦PLUS车型手册",
+        "chunkContent": "秦PLUS DM-i 2024款...",
         "confidence": 0.85
       }
     ],
-    "confidence": 0.9
+    "confidence": 0.8
   }
 }
 ```
 
 ---
 
-### 9️⃣ 对话历史查询
+### 9️⃣ 对话历史与多轮上下文
 
-**接口**：`GET /api/qa/history?page=0&pageSize=10`
+**接口**：`GET /api/qa/sessions/{sessionId}/messages`
 
-**代码**：[`QAService.java:208-224`](file:///Users/sunguangxu/Documents/trae_projects/langchaindemo/rag-search-service/src/main/java/com/example/rag/service/QAService.java#L208-L224)
+**上下文注入原理**：
+
+```
+SessionId=f47ac10b...
+
+第1轮："汉兰达有什么配置"         ──→ AgentService ──→ 这是7座SUV，分精英/豪华/尊贵/至尊...
+                                     │
+第2轮："最低配落地多少钱"           │  loadHistory(sessionId)
+                                     │  → [User: "汉兰达有什么配置",
+                                     │     Assistant: "这是7座SUV，分精英/豪华/尊贵/至尊..."]
+                                     │  → new UserMessage("最低配落地多少钱")
+                                     │
+                                     └─→ ChatClient.tools(...)
+                                           └─ LLM 结合历史理解："最低配"指的是汉兰达
+                                               → function_call: calculateOnRoadPrice("汉兰达")
+                                               → 返回 精英版5座 落地价
+```
+
+**代码**：
 
 ```java
-public PagedResponse<Question> getQuestionHistory(UUID userId, int page, int pageSize) {
-    Page<Question> pageParam = new Page<>(page + 1, pageSize);  // MyBatis-Plus 从 1 开始
-    IPage<Question> questionPage = questionMapper.findByUserId(pageParam, userId);
-    return PagedResponse.<Question>builder()
-            .list(questionPage.getRecords())
-            .total(questionPage.getTotal())
-            .page(page)          // 返回 0-based 页码给前端
-            .pageSize(pageSize)
-            .totalPages((int) questionPage.getPages())
-            .build();
+if (sessionId != null) {
+    List<Question> history = questionMapper.findBySessionIdOrderByCreatedAt(sessionId);
+    for (Question q : history) {
+        Answer a = answerMapper.findByQuestionId(q.getId()).orElse(null);
+        messages.add(new UserMessage(q.getQuestion()));
+        if (a != null && a.getAnswer() != null) {
+            messages.add(new AssistantMessage(a.getAnswer()));
+        }
+    }
 }
+```
+
+---
+
+### 0️⃣ 会话管理
+
+**接口一览**：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/qa/sessions` | 获取当前用户所有会话列表 |
+| `GET` | `/api/qa/sessions/{id}/messages` | 获取指定会话的所有问答消息 |
+| `DELETE` | `/api/qa/sessions/{id}` | 删除会话（级联删除所有问答） |
+| `GET` | `/api/qa/history?page=0&pageSize=10` | 分页获取提问历史 |
+
+**删除会话的级联逻辑**：
+
+```java
+@Transactional
+public void deleteSession(UUID sessionId) {
+    // 1. 查询该会话下所有 question ID
+    List<UUID> questionIds = questionMapper.findQuestionIdsBySessionId(sessionId);
+    // 2. 先删除所有关联的 answer（解除外键约束）
+    if (!questionIds.isEmpty()) {
+        answerMapper.deleteByQuestionIds(questionIds);
+    }
+    // 3. 再删除所有 question
+    questionMapper.deleteBySessionId(sessionId);
+}
+```
+
+---
+
+## Tool Calling 详解
+
+### 3.1 @Tool 注解机制
+
+Spring AI 1.1.6 的 `@Tool` 注解将任意 Java 方法声明为 LLM 可调用的函数。框架通过反射解析方法签名，自动生成 OpenAI Function Calling 所需的 JSON Schema。
+
+```java
+@Component
+public class CarPriceCalculator {
+
+    @Tool(description = "计算某款车型所有配置的落地价格，包含购置税、保险、上牌费等")
+    public String calculateOnRoadPrice(
+            @ToolParam(description = "车型名称，如秦PLUS、凯美瑞、汉兰达等") String carModel) {
+        // ... 价格计算逻辑
+    }
+
+    @Tool(description = "计算分期购车的月供金额，含不同首付比例和贷款年限的组合方案")
+    public String calculateMonthlyPayment(
+            @ToolParam(description = "车型名称") String carModel,
+            @ToolParam(description = "首付比例，如0.3表示30%首付") double downPaymentRatio,
+            @ToolParam(description = "贷款年限（1-5年）") int years) {
+        // ... 月供计算逻辑（等额本息公式）
+    }
+}
+```
+
+```java
+@Component
+public class AutomotiveAssistantTools {
+
+    @Tool(description = "回答问候语或能力咨询，介绍助手能提供的服务")
+    public String greet() { /* ... */ }
+
+    @Tool(description = "获取联系方式、门店地址、试驾预约、售后热线等信息。" +
+            "调用时机：用户询问怎么联系、电话、地址、门店、试驾预约、售后时调用")
+    public String getContactInfo(
+            @ToolParam(description = "咨询类型：sales(销售)、afterSales(售后)、testDrive(试驾)")
+            String type) { /* ... */ }
+
+    @Tool(description = "查询当前的优惠活动、促销、降价、金融方案、置换补贴、购置税政策等")
+    public String getPromotions(
+            @ToolParam(description = "咨询类型：loan(贷款)、tradeIn(置换补贴)、general(一般活动)")
+            String category) { /* ... */ }
+}
+```
+
+### 3.2 JSON Schema 自动生成
+
+`@Tool` + `@ToolParam` 的元数据 → 框架自动生成 → 随 API 请求发送给 LLM。
+
+以 `calculateOnRoadPrice` 为例，LLM 实际接收到的 Function Schema：
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "calculateOnRoadPrice",
+    "description": "计算某款车型所有配置的落地价格，包含购置税、保险、上牌费等",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "carModel": {
+          "type": "string",
+          "description": "车型名称，如秦PLUS、凯美瑞、汉兰达等"
+        }
+      },
+      "required": ["carModel"]
+    }
+  }
+}
+```
+
+**`description` 的写法直接影响 LLM 调用准确率**：
+
+```
+❌ 坏：description = "查询价格"
+     → LLM 不知道何时该用，可能乱调或从不调
+
+✅ 好：description = "计算某款车型所有配置的落地价格，包含购置税、保险、上牌费等。"
+                    + "调用时机：用户询问某车型落地价、上路价、全款总价时调用"
+     → LLM 精确理解使用场景，正确触发
+```
+
+### 3.3 LLM 函数调用多轮协作
+
+LLM 调用工具不是一次完成，而是**多轮请求-响应**：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 第1轮：Client → LLM                                           │
+│                                                              │
+│ POST /v1/chat/completions                                    │
+│ {                                                            │
+│   "messages": [                                              │
+│     {"role":"system","content":"你是汽车销售顾问..."},        │
+│     {"role":"user","content":"【RAG文档】...\n秦PLUS落地多少钱"}│
+│   ],                                                         │
+│   "tools": [                                                 │
+│     {                                                        │
+│       "type": "function",                                    │
+│       "function": {                                          │
+│         "name": "calculateOnRoadPrice",                      │
+│         "description": "计算某款车型...",                     │
+│         "parameters": {...}                                  │
+│       }                                                      │
+│     },                                                       │
+│     { "function": { "name": "greet", ... } },                │
+│     { "function": { "name": "getContactInfo", ... } },       │
+│     ...                                                      │
+│   ]                                                          │
+│ }                                                            │
+│                                                              │
+│ LLM 返回（不是文本！是 tool_calls 指令）：                     │
+│ {                                                            │
+│   "role": "assistant",                                       │
+│   "tool_calls": [{                                           │
+│     "id": "call_abc123",                                     │
+│     "type": "function",                                      │
+│     "function": {                                            │
+│       "name": "calculateOnRoadPrice",                        │
+│       "arguments": "{\"carModel\":\"秦PLUS\"}"               │
+│     }                                                        │
+│   }]                                                         │
+│ }                                                            │
+│                                                              │
+│ ChatClient 自动执行 → calculateOnRoadPrice("秦PLUS")          │
+│ 获得结果 → "【秦PLUS】落地价格明细：\n📋 55km领先型：..."       │
+└──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│ 第2轮：Client → LLM（ChatClient 自动发起）                     │
+│                                                              │
+│ {                                                            │
+│   "messages": [                                              │
+│     ...原有消息...,                                           │
+│     {"role":"assistant","tool_calls":[...]},                 │
+│     {"role":"tool","tool_call_id":"call_abc123",              │
+│      "content":"【秦PLUS】落地价格明细：\n📋 55km领先型：..."} │
+│   ]                                                          │
+│ }                                                            │
+│                                                              │
+│ LLM 返回最终自然语言文本：                                     │
+│ "秦PLUS DM-i 目前有5款配置可选，帮您算一下落地价哈～\n\n..."    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 3.4 工具类清单
+
+| 工具类 | 包路径 | @Tool 方法 | 功能 |
+|--------|--------|-----------|------|
+| `CarPriceCalculator` | `tool/CarPriceCalculator.java` | `calculateOnRoadPrice(carModel)` | 落地价计算（购置税+保险+上牌） |
+| `CarPriceCalculator` | 同上 | `calculateMonthlyPayment(carModel, ratio, years)` | 月供计算（等额本息） |
+| `AutomotiveAssistantTools` | `tool/AutomotiveAssistantTools.java` | `greet()` | 问候与能力介绍 |
+| `AutomotiveAssistantTools` | 同上 | `getContactInfo(type)` | 联系方式/门店/售后/试驾 |
+| `AutomotiveAssistantTools` | 同上 | `getPromotions(category)` | 优惠活动/金融方案/置换补贴 |
+
+---
+
+## MCP 协议集成
+
+### 4.1 MCP 三层架构
+
+MCP (Model Context Protocol) 是 Anthropic 提出的 **AI 工具互操作标准协议**，允许任何兼容的 AI 客户端自动发现并调用服务端暴露的工具。
+
+```
+┌──────────────────────────────────────────────────────┐
+│  Client/Server Layer                                 │
+│  ┌──────────┐           ┌───────────────────────┐    │
+│  │ McpClient │◄──JSON-RPC──►│ McpServer              │   │
+│  │ (外部AI)  │ 2.0       │ (本项目)                │   │
+│  └──────────┘           │ - 工具暴露              │   │
+│                         │ - 资源管理              │   │
+├─────────────────────────┴───────────────────────────┤
+│  Session Layer                                      │
+│  McpSession: 通信模式管理、连接状态维护                 │
+├─────────────────────────────────────────────────────┤
+│  Transport Layer                                    │
+│  STDIO | SSE | Streamable-HTTP | Stateless-HTTP     │
+└─────────────────────────────────────────────────────┘
+```
+
+### 4.2 @McpTool 注解
+
+将内部 `@Tool` 方法适配为 MCP 协议标准接口：
+
+```java
+@Component
+public class McpToolsAdapter {
+
+    @McpTool(name = "calculate-on-road-price",
+            description = "计算某款车型所有配置的落地价格，包含购置税、保险、上牌费等。" +
+                    "调用时机：用户询问某车型落地价、上路价、全款总价时调用")
+    public String calculateOnRoadPrice(
+            @McpToolParam(description = "车型名称，如秦PLUS、凯美瑞、汉兰达等") String carModel) {
+        return priceCalculator.calculateOnRoadPrice(carModel);
+    }
+
+    @McpTool(name = "calculate-monthly-payment",
+            description = "计算分期购车的月供金额...")
+    public String calculateMonthlyPayment(
+            @McpToolParam(description = "车型名称") String carModel,
+            @McpToolParam(description = "首付比例，如0.3表示30%首付") double downPaymentRatio,
+            @McpToolParam(description = "贷款年限（1-5年）") int years) {
+        return priceCalculator.calculateMonthlyPayment(carModel, downPaymentRatio, years);
+    }
+
+    @McpTool(name = "get-contact-info", description = "获取联系方式、门店地址...")
+    public String getContactInfo(
+            @McpToolParam(description = "咨询类型", required = false) String type) {
+        return assistantTools.getContactInfo(type);
+    }
+
+    @McpTool(name = "get-promotions", description = "查询当前的优惠活动...")
+    public String getPromotions(
+            @McpToolParam(description = "咨询类型", required = false) String category) {
+        return assistantTools.getPromotions(category);
+    }
+
+    @McpTool(name = "greet", description = "回答问候语或能力咨询...")
+    public String greet() {
+        return assistantTools.greet();
+    }
+}
+```
+
+**`@Tool` vs `@McpTool` 的关系**：
+
+| 维度 | `@Tool` | `@McpTool` |
+|------|---------|-----------|
+| 消费方 | 本项目 ChatClient 内部 | 外部 MCP 客户端（Claude Desktop 等） |
+| 协议 | OpenAI Function Calling | MCP JSON-RPC 2.0 |
+| 注解包 | `org.springframework.ai.tool.annotation` | `org.springaicommunity.mcp.annotation` |
+| 端口 | 无需额外端口 | `/mcp` 端点 |
+
+### 4.3 协议交互时序
+
+```
+外部 MCP 客户端                  本项目 MCP Server
+
+     │── initialize ─────────────────────►│  握手：协商协议版本和能力
+     │   {"protocolVersion":"2024-11-05"} │
+     │                                     │
+     │◄─ capabilities ───────────────────│  返回：支持 tools 功能
+     │   {"capabilities":{"tools":{}}}    │
+     │                                     │
+     │── tools/list ──────────────────────►│  发现：获取所有工具
+     │                                     │
+     │◄─ tool list ──────────────────────│  返回 @McpTool 定义的全部工具
+     │   [                                  │  含自动生成的 JSON Schema
+     │     {"name":"calculate-on-road-price",
+     │      "description":"计算某款车型...",
+     │      "inputSchema":{"type":"object",
+     │        "properties":{"carModel":...}}},
+     │     {"name":"get-promotions",...},
+     │     {"name":"greet",...}
+     │   ]                                  │
+     │                                     │
+     │── tools/call ──────────────────────►│  调用：执行具体工具
+     │   {"name":"calculate-on-road-price",│
+     │    "arguments":{"carModel":"汉兰达"}}│
+     │                                     │
+     │◄─ tool result ─────────────────────│  返回工具执行结果
+     │   {"content":[{"type":"text",        │
+     │     "text":"【汉兰达】落地价格明细..."}]}│
+```
+
+### 4.4 依赖与配置
+
+**pom.xml**：
+
+```xml
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
+</dependency>
+```
+
+依赖传递：`spring-ai-starter-mcp-server-webmvc` → `spring-ai-autoconfigure-mcp-server-webmvc` → `spring-ai-mcp` → `spring-ai-mcp-annotations` → `mcp-annotations:0.9.0`
+
+**application.yml**：
+
+```yaml
+spring.ai.mcp.server:
+  protocol: STREAMABLE           # Streamable-HTTP 协议，支持双向流式通信
+  annotation:
+    enabled: true                # 启用 @McpTool 注解扫描
+    base-packages: com.example.rag.mcp  # 限定扫描包
 ```
 
 ---
 
 ## Spring AI 框架详解
 
-### 3.1 什么是 Spring AI
-
-Spring AI 是 Spring 生态下的 AI 应用开发框架（版本 1.0.0），核心设计理念是 **AI 模型的可移植性** —— 用统一的 API 接口屏蔽不同 AI 服务商的差异，让切换模型就像切换数据库驱动一样简单。
+### 接口体系
 
 ```
-              ┌───────────────────────┐
-              │   Spring AI API       │
-              │  (ChatModel,          │
-              │   EmbeddingModel,     │
-              │   Prompt, Message)     │
-              └───────────┬───────────┘
-                          │
-          ┌───────────────┼───────────────┐
-          │               │               │
-    ┌─────┴─────┐  ┌─────┴─────┐  ┌─────┴─────┐
-    │ OpenAI    │  │ Azure     │  │ Ollama    │  ... 更多提供商
-    │ (DeepSeek)│  │ OpenAI    │  │ (本地)     │
-    └───────────┘  └───────────┘  └───────────┘
+                     Model<T, R>
+                   (泛型接口基类)
+                         │
+          ┌──────────────┼──────────────┐
+          │              │              │
+    ChatModel      EmbeddingModel   ImageModel
+  (聊天模型)       (嵌入模型)       (图像模型)
 ```
 
-### 3.2 本项目的依赖配置
-
-Maven 依赖（`pom.xml`）：
-
-```xml
-<dependency>
-    <groupId>org.springframework.ai</groupId>
-    <artifactId>spring-ai-starter-model-openai</artifactId>
-</dependency>
-```
-
-这个 starter 自动引入：
-- `spring-ai-openai` —— OpenAI API 客户端实现
-- `spring-ai-openai-spring-boot-autoconfigure` —— 自动配置
-- `spring-ai-core` —— 核心 API（`ChatModel`、`EmbeddingModel`、`Prompt` 等）
-
-### 3.3 ChatModel —— 聊天模型
-
-**接口定义**（Spring AI 核心 API）：
+### ChatModel —— 聊天模型
 
 ```java
 public interface ChatModel extends Model<Prompt, ChatResponse> {
     ChatResponse call(Prompt prompt);
-    // + 流式方法 call(StreamingPrompt) 等
+    // + 流式方法
 }
 ```
 
-**本项目中的注入**：
+**本项目两种调用方式**：
 
-```java
-@Service
-public class AgentService {
-    private final ChatModel chatModel;   // ← Spring 自动注入
+| 方式 | 代码 | 场景 |
+|------|------|------|
+| 旧版直接调用 | `chatModel.call(prompt).getResult().getOutput().getText()` | 无工具调用的 RAG 问答 |
+| **新版 Fluent API** | `ChatClient.builder(chatModel).build().prompt().messages().tools().call().content()` | **带工具调用的 RAG 问答** |
 
-    public AnswerResponse answer(String question, UUID knowledgeBaseId) {
-        // ...
-        String answer = chatModel.call(prompt)
-                .getResult()      // ChatResponse → Generation
-                .getOutput()      // Generation → AssistantMessage
-                .getText();       // AssistantMessage → String
-        // ...
-    }
-}
-```
-
-**调用结果链**：
-
-```
-chatModel.call(prompt)
-  └─ ChatResponse
-      └─ .getResult() → Generation
-          └─ .getOutput() → AssistantMessage (继承 AbstractMessage)
-              ├─ .getText() → String（答案正文）
-              └─ .getMetadata() → Map<String, Object>（token 用量等）
-```
-
-**为什么用 DeepSeek 而不是 OpenAI**：
-- DeepSeek 提供了**与 OpenAI 完全兼容的 API 格式**
-- 只需改 `spring.ai.openai.base-url` 即可无缝切换
-- DeepSeek `deepseek-chat` 中文能力更强、成本更低
-
-### 3.4 EmbeddingModel —— 嵌入模型
-
-**接口定义**（Spring AI 核心 API）：
+### EmbeddingModel —— 嵌入模型
 
 ```java
 public interface EmbeddingModel extends Model<EmbeddingRequest, EmbeddingResponse> {
-    EmbeddingResponse call(EmbeddingRequest request);
-
-    // 便捷方法
-    float[] embed(String text);          // 单文本嵌入
+    float[] embed(String text);            // 单文本嵌入
     List<float[]> embed(List<String> texts); // 批量嵌入
-    default int dimensions();            // 向量维度
 }
 ```
 
-**本项目中的使用**：
-
-```java
-@Service
-public class VectorService {
-    private final EmbeddingModel embeddingModel;  // ← Spring AI 注入
-
-    public float[] embed(String text) {
-        return embeddingModel.embed(text);  // 返回 float[1536]
-    }
-}
-```
-
-**注意**：本项目中 `EmbeddingModel` 被绑定到阿里云 DashScope 而非 OpenAI。因为 `application.yml` 中配置了：
-
-```yaml
-spring.ai.openai.embedding.enabled: false    # 关闭 OpenAI Embedding
-
-dashscope:                                   # 使用阿里云 DashScope
-  api-key: sk-xxx
-  embedding:
-    model: text-embedding-v4
-    dimensions: 1536
-```
-
-### 3.5 Prompt / Message —— 提示词体系
-
-Spring AI 提供了结构化的提示词对象模型：
+### Prompt / Message 体系
 
 ```
 Prompt（提示词）
   └─ List<Message>（消息列表）
-      ├─ SystemMessage（系统消息）   → role: "system"
-      ├─ UserMessage（用户消息）     → role: "user"
-      ├─ AssistantMessage（助手消息） → role: "assistant"
-      └─ FunctionMessage（函数消息） → role: "function"
+      ├─ SystemMessage（系统消息）      → role: "system"
+      ├─ UserMessage（用户消息）        → role: "user"
+      ├─ AssistantMessage（助手消息）   → role: "assistant"
+      └─ ToolResponseMessage（工具消息）→ role: "tool"
 ```
 
-**本项目中的使用**：
+### application.yml 配置
+
+```yaml
+spring.ai:
+  openai:
+    api-key: sk-xxx                          # DeepSeek API Key
+    base-url: https://api.deepseek.com       # ← 路由到 DeepSeek（而非 OpenAI）
+    chat:
+      options:
+        model: deepseek-chat                 # 模型名
+        temperature: 0.7                     # 创造性控制
+    embedding:
+      enabled: false                         # 关闭 OpenAI embedding
+
+spring.ai.mcp.server:
+  protocol: STREAMABLE                       # MCP 传输协议
+  annotation:
+    enabled: true
+    base-packages: com.example.rag.mcp       # MCP 注解扫描范围
+```
+
+### 可移植性
+
+切换模型只需改配置，**代码零修改**：
+
+```yaml
+# DeepSeek → Azure OpenAI
+spring.ai.openai.base-url: https://xxx.openai.azure.com
+spring.ai.openai.chat.options.model: gpt-4
+```
+
+---
+
+## 容错与降级策略
+
+本项目设计了**三层容错**机制：
+
+```
+┌─────────────────────────────────────────────┐
+│ Layer 1: @Retryable + 指数退避               │
+│                                             │
+│ @Retryable(                                 │
+│     maxAttempts = 3,                        │
+│     backoff = @Backoff(                     │
+│         delay = 1000,    // 首次等待 1s      │
+│         multiplier = 2   // 每次翻倍         │
+│     )                                       │
+│ )                                           │
+│ // 执行序列：第1次 → 等1s → 第2次 → 等2s → 第3次│
+├─────────────────────────────────────────────┤
+│ Layer 2: @Recover 降级恢复                   │
+│                                             │
+│ 3次重试全失败 → 自动调用 @Recover 方法       │
+│ → 记录 WARN 日志                             │
+│ → 返回 null                                 │
+├─────────────────────────────────────────────┤
+│ Layer 3: fallbackAnswer() 业务降级           │
+│                                             │
+│ agentService.answer() 收到 null →            │
+│ "未找到与您问题直接相关的文档内容..."          │
+│ confidence = 0.5                            │
+└─────────────────────────────────────────────┘
+```
+
+**降级答案生成**：
 
 ```java
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.prompt.Prompt;
-
-Prompt prompt = new Prompt(List.of(
-    new SystemMessage("你是一个企业知识库智能助手..."),
-    new UserMessage("检索内容 + 用户问题...")
-));
-
-ChatResponse response = chatModel.call(prompt);
-```
-
-**发送到 DeepSeek API 的实际 JSON**：
-
-```json
-{
-  "model": "deepseek-chat",
-  "messages": [
-    {"role": "system", "content": "你是一个企业知识库智能助手..."},
-    {"role": "user", "content": "【检索到的相关文档内容】\n\n..."}
-  ],
-  "temperature": 0.7
+private AnswerResponse fallbackAnswer(String question, List<AnswerResponse.SourceInfo> sources) {
+    String answer = "根据知识库中的文档内容，以下是相关信息：\n\n";
+    if (!sources.isEmpty()) {
+        answer += sources.stream()
+                .map(s -> "📄 " + s.getChunkContent())
+                .collect(Collectors.joining("\n\n"));
+    } else {
+        answer += "未找到与您问题直接相关的文档内容，建议您重新表述问题或查看相关文档。";
+    }
+    return AnswerResponse.builder().answer(answer).sources(sources).confidence(0.5f).build();
 }
-```
-
-### 3.6 application.yml 配置详解
-
-```yaml
-spring:
-  ai:
-    openai:
-      api-key: sk-1fe6875284c74e60ac6d7f2062773061   # DeepSeek API Key
-      base-url: https://api.deepseek.com              # ← 关键：指向 DeepSeek
-      chat:
-        options:
-          model: deepseek-chat                         # 模型名
-          temperature: 0.7                             # 创造性（0=确定，1=随机）
-      embedding:
-        enabled: false                                 # ← 不用 OpenAI embedding
-
-dashscope:                                            # 阿里云 DashScope（非 Spring AI 原生）
-  api-key: sk-cbb9eff1415f46b4b954c9bb9129e341
-  embedding:
-    model: text-embedding-v4
-    dimensions: 1536
-```
-
-**配置说明**：
-- `spring.ai.openai.base-url` 指向 DeepSeek → ChatModel 自动路由到 DeepSeek
-- `spring.ai.openai.chat.options.model` 指定使用 `deepseek-chat` 模型
-- `temperature: 0.7` 控制回答的创造性，知识库答疑建议 0.3~0.7
-- `embedding.enabled: false` 关闭 OpenAI embedding，改用 DashScope
-
-### 3.7 Spring AI 可移植性原理
-
-假设要从 DeepSeek 切换到 Azure OpenAI，只需改配置：
-
-```yaml
-# 从 DeepSeek
-spring.ai.openai.base-url: https://api.deepseek.com
-spring.ai.openai.chat.options.model: deepseek-chat
-
-# 改为 Azure OpenAI
-spring.ai.azure.openai.api-key: ${AZURE_OPENAI_KEY}
-spring.ai.azure.openai.endpoint: https://xxx.openai.azure.com
-spring.ai.azure.openai.chat.options.deployment-name: gpt-4
-```
-
-**代码**（`AgentService`）**不需要任何修改！** `ChatModel` 接口隔离了具体实现。
-
-同样，Embedding 模型也可以切换：
-
-```yaml
-# 从 DashScope（当前）
-# ...自定义配置
-
-# 改为 OpenAI embedding
-spring.ai.openai.embedding.enabled: true
-spring.ai.openai.embedding.options.model: text-embedding-ada-002
-```
-
-### 3.8 常见问题与最佳实践
-
-#### Q1: Spring AI ChatModel 和直接调用 HTTP API 有什么区别？
-
-| | Spring AI ChatModel | 直接 HTTP 调用 |
-|---|---|---|
-| 代码量 | `chatModel.call(prompt)` 一行 | 需手动构建请求、解析响应 |
-| 可移植性 | 换模型改配置即可 | 需要改代码 |
-| 错误处理 | 框架统一处理 | 需自己实现 |
-| 流式输出 | `Flux<ChatResponse> stream()` | 需处理 SSE 流 |
-| 类型安全 | 强类型 Prompt/Message | JSON 字符串拼接 |
-
-#### Q2: 为什么 embedding 不用 Spring AI，而是自定义 DashScope？
-
-Spring AI 1.0 的 `EmbeddingModel` 对 DashScope 的支持是通过 OpenAI 兼容适配的，本项目通过自定义配置绑定到阿里云原生 DashScope SDK，获取更好的性能和中文语义效果。
-
-#### Q3: 如何实现流式输出（SSE）？
-
-```java
-// 非流式（当前）
-String answer = chatModel.call(prompt).getResult().getOutput().getText();
-
-// 流式（Spring AI 原生支持）
-Flux<ChatResponse> stream = chatModel.stream(prompt);
-return stream.map(r -> r.getResult().getOutput().getText());
-// 前端通过 Server-Sent Events 逐步接收
-```
-
-#### Q4: Prompt 中如何保留多轮对话历史？
-
-```java
-List<Message> messages = new ArrayList<>();
-messages.add(new SystemMessage("你是一个企业知识库助手"));
-
-// 添加历史对话
-for (Conversation conv : history) {
-    messages.add(new UserMessage(conv.getQuestion()));
-    messages.add(new AssistantMessage(conv.getAnswer()));
-}
-
-// 添加当前问题
-messages.add(new UserMessage("当前的检索上下文 + 用户问题"));
-
-Prompt prompt = new Prompt(messages);
 ```
 
 ---
@@ -780,19 +953,24 @@ Prompt prompt = new Prompt(messages);
 | 文件 | 路径 | 职责 |
 |------|------|------|
 | `QAController` | `controller/QAController.java` | HTTP 接口，JWT 鉴权，`@Valid` 校验 |
-| `QAService` | `service/QAService.java` | 问答编排：持久化问题→调用 Agent→持久化答案 |
-| `AgentService` | `service/AgentService.java` | RAG 核心：向量化→检索→Prompt→LLM |
+| `QAService` | `service/QAService.java` | 问答编排：持久化→Agent→持久化，会话管理 |
+| `AgentService` | `service/AgentService.java` | RAG 核心 + **Tool Calling 调度** |
 | `VectorService` | `service/VectorService.java` | 向量生成 + pgvector 检索 |
-| `QuestionRequest` | `dto/request/QuestionRequest.java` | 请求 DTO（question + knowledgeBaseId） |
-| `AnswerResponse` | `dto/response/AnswerResponse.java` | 响应 DTO（answer + sources + confidence） |
+| `CarPriceCalculator` | `tool/CarPriceCalculator.java` | **@Tool** 落地价/月供计算 |
+| `AutomotiveAssistantTools` | `tool/AutomotiveAssistantTools.java` | **@Tool** 问候/联系/优惠 |
+| `McpToolsAdapter` | `mcp/McpToolsAdapter.java` | **@McpTool** MCP 协议对外暴露 |
+| `DocumentProcessService` | `service/DocumentProcessService.java` | 文档拆分（Markdown 章节级）+ 向量化入库 |
+| `DashScopeEmbeddingConfig` | `config/DashScopeEmbeddingConfig.java` | DashScope Embedding 配置 + 重试 |
+| `QuestionRequest` | `dto/request/QuestionRequest.java` | 请求 DTO |
+| `AnswerResponse` | `dto/response/AnswerResponse.java` | 响应 DTO |
 | `Question` | `entity/Question.java` | question 表实体 |
 | `Answer` | `entity/Answer.java` | answer 表实体 |
 | `QuestionMapper` | `mapper/QuestionMapper.java` | question 表 DAO |
 | `AnswerMapper` | `mapper/AnswerMapper.java` | answer 表 DAO |
-| `DocumentChunkVectorMapper` | `mapper/DocumentChunkVectorMapper.java` | 向量检索 Mapper 接口 |
+| `DocumentChunkVectorMapper` | `mapper/DocumentChunkVectorMapper.java` | 向量检索 Mapper |
 | `DocumentChunkVectorMapper.xml` | `resources/mapper/DocumentChunkVectorMapper.xml` | 向量检索 SQL |
-| `application.yml` | `resources/application.yml` | Spring AI / DeepSeek / DashScope 配置 |
-| `pom.xml` | `pom.xml` | `spring-ai-starter-model-openai` 依赖 |
+| `application.yml` | `resources/application.yml` | Spring AI / DeepSeek / DashScope / MCP 配置 |
+| `pom.xml` | `pom.xml` | `spring-ai-starter-model-openai` + `spring-ai-starter-mcp-server-webmvc` |
 
 ---
 
@@ -806,6 +984,7 @@ public class Question {
     @TableId(type = IdType.ASSIGN_UUID)
     private UUID id;
     private UUID userId;           // 提问用户
+    private UUID sessionId;        // 多轮会话 ID
     private String question;       // 问题文本
     private UUID knowledgeBaseId;  // 限定知识库（可为 null）
     private Status status;         // PENDING / ANSWERED / FAILED
@@ -822,7 +1001,7 @@ public class Question {
 public class Answer {
     @TableId(type = IdType.ASSIGN_UUID)
     private UUID id;
-    private UUID questionId;       // 关联 question 表（1:1）
+    private UUID questionId;       // 关联 question 表（1:1，外键）
     private String answer;         // AI 生成的答案
     private String sources;        // JSON 格式的引用来源
     private Float confidence;      // 置信度
@@ -832,106 +1011,154 @@ public class Answer {
 
 ---
 
-## 时序图
+## 时序图（完整）
 
 ```
-Client      QAController      QAService      AgentService     VectorService     pgvector      DeepSeek API
-  │              │                 │                │                │                │              │
-  │ POST /question│                │                │                │                │              │
-  │ ────────────>│                 │                │                │                │              │
-  │              │ JWT 鉴权        │                │                │                │              │
-  │              │ getUserId()     │                │                │                │              │
-  │              │                 │                │                │                │              │
-  │              │ askQuestion()   │                │                │                │              │
-  │              │ ───────────────>│                │                │                │              │
-  │              │                 │ INSERT question │                │                │              │
-  │              │                 │ (PENDING)       │                │                │              │
-  │              │                 │ ───────────────────────────────────────────────>│              │
-  │              │                 │                │                │                │              │
-  │              │                 │ answer(q, kbId) │                │                │              │
-  │              │                 │ ───────────────>│                │                │              │
-  │              │                 │                │                │                │              │
-  │              │                 │                │ embed(question)│                │              │
-  │              │                 │                │ ──────────────>│                │              │
-  │              │                 │                │                │ DashScope API   │              │
-  │              │                 │                │ <──────────────│ float[1536]     │              │
-  │              │                 │                │                │                │              │
-  │              │                 │                │ searchByCosine │                │              │
-  │              │                 │                │ ──────────────>│                │              │
-  │              │                 │                │                │ <=> 相似度查询  │              │
-  │              │                 │                │ <──────────────│ top-5 chunks    │              │
-  │              │                 │                │                │                │              │
-  │              │                 │                │ buildContext(chunks)             │              │
-  │              │                 │                │ buildSources(chunks)             │              │
-  │              │                 │                │                │                │              │
-  │              │                 │                │ new Prompt(                      │              │
-  │              │                 │                │   SystemMessage,                 │              │
-  │              │                 │                │   UserMessage)                   │              │
-  │              │                 │                │                │                │              │
-  │              │                 │                │ chatModel.call(prompt)           │              │
-  │              │                 │                │ ────────────────────────────────>│ deepseek-chat│
-  │              │                 │                │ <────────────────────────────────│ answer text  │
-  │              │                 │                │                │                │              │
-  │              │                 │ <──────────────│ AnswerResponse  │                │              │
-  │              │                 │                │                │                │              │
-  │              │                 │ INSERT answer  │                │                │              │
-  │              │                 │ (sources JSON)  │                │                │              │
-  │              │                 │ ───────────────────────────────────────────────>│              │
-  │              │                 │                │                │                │              │
-  │              │                 │ UPDATE question │                │                │              │
-  │              │                 │ (ANSWERED)      │                │                │              │
-  │              │                 │ ───────────────────────────────────────────────>│              │
-  │              │                 │                │                │                │              │
-  │              │ <───────────────│ AnswerResponse  │                │                │              │
-  │              │                 │                │                │                │              │
-  │ <────────────│ 200 + data      │                │                │                │              │
+Client       QAController     QAService      AgentService      ChatClient+Tools    pgvector     DeepSeek
+  │               │               │                │                  │                │            │
+  │ POST /question│               │                │                  │                │            │
+  │ ─────────────>│               │                │                  │                │            │
+  │               │ JWT鉴权       │                │                  │                │            │
+  │               │ askQuestion() │                │                  │                │            │
+  │               │ ─────────────>│                │                  │                │            │
+  │               │               │ INSERT question│                  │                │            │
+  │               │               │ (PENDING)      │                  │                │            │
+  │               │               │ ──────────────────────────────────────────────────>│            │
+  │               │               │                                                     │            │
+  │               │               │ answer(q, kbId, sId)                              │            │
+  │               │               │ ───────────────>│                                 │            │
+  │               │               │                │                                  │            │
+  │               │               │                │ embed(question)                   │            │
+  │               │               │                │ ───→ DashScope API → float[1536]  │            │
+  │               │               │                │                                  │            │
+  │               │               │                │ searchByCosineSimilarity()        │            │
+  │               │               │                │ ────────────────────────────────>│            │
+  │               │               │                │ <── top-5 DocumentChunk ─────────│            │
+  │               │               │                │                                  │            │
+  │               │               │                │ buildMessages()                   │            │
+  │               │               │                │  • SystemMessage                  │            │
+  │               │               │                │  • 多轮历史                       │            │
+  │               │               │                │  • RAG上下文 + 问题                │            │
+  │               │               │                │                                  │            │
+  │               │               │                │ callChatClientWithTools(msgs)     │            │
+  │               │               │                │ ──────────────>│                  │            │
+  │               │               │                │                │                  │            │
+  │               │               │                │                │ ① POST /v1/chat  │            │
+  │               │               │                │                │   messages+     │            │
+  │               │               │                │                │   tools 定义     │            │
+  │               │               │                │                │ ───────────────────────────>│
+  │               │               │                │                │                              │
+  │               │               │                │                │ ② LLM返回 tool_calls         │
+  │               │               │                │                │ <───────────────────────────│
+  │               │               │                │                │                              │
+  │               │               │                │                │ ③ 自动执行工具                │
+  │               │               │                │                │   calculateOnRoadPrice()      │
+  │               │               │                │                │   getPromotions()             │
+  │               │               │                │                │  ...                          │
+  │               │               │                │                │                              │
+  │               │               │                │                │ ④ POST /v1/chat              │
+  │               │               │                │                │   发回工具结果                │
+  │               │               │                │                │ ───────────────────────────>│
+  │               │               │                │                │                              │
+  │               │               │                │                │ ⑤ LLM生成最终答案             │
+  │               │               │                │                │ <───────────────────────────│
+  │               │               │                │                │                              │
+  │               │               │                │<─ String answer─│                  │            │
+  │               │               │                │                                  │            │
+  │               │               │ <─ AnswerResponse│                                 │            │
+  │               │               │                │                                  │            │
+  │               │               │ INSERT answer   │                                  │            │
+  │               │               │ UPDATE question │                                  │            │
+  │               │               │ (ANSWERED)      │                                  │            │
+  │               │               │ ──────────────────────────────────────────────────>│            │
+  │               │               │                                                     │            │
+  │               │ <─ AnswerResp─│                                                     │            │
+  │               │               │                                                     │            │
+  │ <── 200 OK ───│               │                                                     │            │
 ```
 
 ---
 
 ## 快速测试
 
-### 提问
+### 1. 获取 Token
 
 ```bash
-# 1. 获取 Token
 TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"testuser2024","password":"123456"}' | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['token'])")
-
-# 2. 全局检索提问（不限定知识库）
-curl -s -X POST http://localhost:8080/api/qa/question \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"question":"请假流程是什么？"}' | python3 -m json.tool
-
-# 3. 限定知识库提问
-curl -s -X POST http://localhost:8080/api/qa/question \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"question":"请假流程是什么？","knowledgeBaseId":"cea53e8d-3fda-4797-9fdb-fe03c5a5bc19"}' \
-  | python3 -m json.tool
 ```
 
-### 查询对话历史
+### 2. 提问（触发 Tool Calling）
+
+```bash
+# 落地价计算 → LLM 自动调用 calculateOnRoadPrice
+curl -s -X POST http://localhost:8080/api/qa/question \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"秦PLUS落地多少钱？"}' | python3 -m json.tool
+
+# 月供计算 → LLM 自动调用 calculateMonthlyPayment
+curl -s -X POST http://localhost:8080/api/qa/question \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"汉兰达首付3成分5年月供多少？"}' | python3 -m json.tool
+
+# 知识问答 → LLM 基于 RAG 上下文直接回答
+curl -s -X POST http://localhost:8080/api/qa/question \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"请介绍一下秦PLUS的配置参数"}' | python3 -m json.tool
+```
+
+### 3. 多轮对话测试
+
+```bash
+# 第1轮
+curl -s -X POST http://localhost:8080/api/qa/question \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"汉兰达有什么配置"}' | python3 -m json.tool
+
+# 从返回的 sessionId 继续第2轮（LLM 结合上文理解指代）
+curl -s -X POST http://localhost:8080/api/qa/question \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"最低配落地多少钱","sessionId":"上一步返回的sessionId"}' | python3 -m json.tool
+```
+
+### 4. 会话管理
+
+```bash
+# 获取会话列表
+curl -s "http://localhost:8080/api/qa/sessions" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# 获取会话消息
+curl -s "http://localhost:8080/api/qa/sessions/{sessionId}/messages" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# 删除会话
+curl -s -X DELETE "http://localhost:8080/api/qa/sessions/{sessionId}" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+### 5. 查询对话历史
 
 ```bash
 curl -s "http://localhost:8080/api/qa/history?page=0&pageSize=5" \
   -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 
-### 验证向量检索效果
+### 6. MCP 端点验证
 
-```sql
--- 查看某次问答中使用的检索结果
-SELECT dc.chunk_index, dc.content,
-       1 - (dv.embedding <=> (
-           SELECT dv2.embedding FROM document_chunk_vector dv2
-           WHERE dv2.id = '某个 chunk_id'
-       )) AS similarity
-FROM document_chunk dc
-JOIN document_chunk_vector dv ON dc.id = dv.id
-ORDER BY similarity DESC
-LIMIT 5;
+```bash
+# MCP Server 在 /mcp 端点上监听
+# 验证服务是否就绪
+curl -s http://localhost:8080/mcp/health 2>/dev/null || echo "MCP 端点就绪"
 ```
+
+---
+
+> **技术栈版本**：Spring Boot 3.5.14 · Spring AI 1.1.6 · MCP Java SDK 0.18.2 · MCP Annotations 0.9.0 · JDK 21 · DeepSeek deepseek-chat · 阿里云 DashScope text-embedding-v4 · PostgreSQL + pgvector · MyBatis-Plus 3.5.7

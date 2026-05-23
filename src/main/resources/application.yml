@@ -3,40 +3,17 @@ server:
   port: 8080
 
 spring:
+  application:
+    name: rag-search-service
+  profiles:
+    active: dev
   datasource:
-    url: jdbc:postgresql://localhost:5432/example_db
-    username: postgres
-    password: 123456
     driver-class-name: org.postgresql.Driver
-
-  data:
-    redis:
-      host: localhost
-      port: 6379
-      password:
-
-  ai:
-    openai:
-      api-key: xxxxx
-      base-url: https://api.deepseek.com
-      chat:
-        options:
-          model: deepseek-chat
-          temperature: 0.7
-      embedding:
-        enabled: false
-
   servlet:
     multipart:
       enabled: true
       max-file-size: 50MB
       max-request-size: 50MB
-
-dashscope:
-  api-key: xxxx
-  embedding:
-    model: text-embedding-v4
-    dimensions: 1536
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -44,7 +21,6 @@ mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
     cache-enabled: false
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
   global-config:
     db-config:
       id-type: assign_uuid
@@ -52,37 +28,21 @@ mybatis-plus:
       logic-delete-value: 1
       logic-not-delete-value: 0
 
-jwt:
-  secret: your-256-bit-secret-key-here-must-be-at-least-32-characters
-  expiration: 1800000
-  refresh-expiration: 604800000
-
 springdoc:
   api-docs:
     path: /api-docs
   swagger-ui:
     path: /swagger-ui.html
 
-logging:
-  level:
-    com.example.rag: DEBUG
-    com.example.rag.controller: INFO
-    com.example.rag.service: INFO
-    com.example.rag.mapper: DEBUG
-    org.springframework.security: INFO
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{traceId}] [%X{spanId}] - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{traceId}] [%X{spanId}] - %msg%n"
-  file:
-    name: ./logs/rag-app.log
-  logback:
-    rollingpolicy:
-      max-file-size: 10MB
-      max-history: 30
-      total-size-cap: 1GB
-
 management:
   endpoints:
     web:
       exposure:
         include: health,info,metrics
+
+# Spring AI MCP 服务端配置（模型上下文协议）
+spring.ai.mcp.server:
+  protocol: STREAMABLE
+  annotation:
+    enabled: true
+    base-packages: com.example.rag.mcp

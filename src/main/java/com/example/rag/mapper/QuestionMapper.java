@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.rag.entity.Question;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -150,4 +151,21 @@ public interface QuestionMapper extends BaseMapper<Question> {
     @Select("SELECT q.question as question, COUNT(*) as cnt FROM question q " +
             "GROUP BY q.question ORDER BY COUNT(*) DESC LIMIT #{limit}")
     List<java.util.Map<String, Object>> findHotQuestions(@Param("limit") int limit);
+
+    /**
+     * 查询指定会话的所有问题ID
+     *
+     * @param sessionId 会话ID
+     * @return 问题ID列表
+     */
+    @Select("SELECT id FROM question WHERE session_id = #{sessionId}::uuid")
+    List<UUID> findQuestionIdsBySessionId(@Param("sessionId") UUID sessionId);
+
+    /**
+     * 删除指定会话的所有问题记录
+     *
+     * @param sessionId 会话ID
+     */
+    @Delete("DELETE FROM question WHERE session_id = #{sessionId}::uuid")
+    void deleteBySessionId(@Param("sessionId") UUID sessionId);
 }

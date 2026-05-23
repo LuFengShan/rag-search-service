@@ -1,29 +1,56 @@
+# 测试环境配置
 spring:
-  application:
-    name: rag-test
+  config:
+    activate:
+      on-profile: test
 
   datasource:
     url: jdbc:h2:mem:testdb
-    driver-class-name: org.h2.Driver
     username: sa
     password:
 
-  jpa:
-    hibernate:
-      ddl-auto: create-drop
-    show-sql: true
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.H2Dialect
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
 
-  security:
-    enabled: false
+  ai:
+    openai:
+      api-key: test-api-key
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-chat
+          temperature: 0.7
+      embedding:
+        enabled: false
+
+dashscope:
+  api-key: test-api-key
+  embedding:
+    model: text-embedding-v4
+    dimensions: 1536
+
+jwt:
+  secret: test-secret-key-must-be-at-least-32-characters-long
+  expiration: 1800000
+  refresh-expiration: 604800000
 
 logging:
   level:
     root: WARN
     com.example.rag: DEBUG
     org.apache.tika: INFO
+    org.springframework.security: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: ./logs/rag-app-test.log
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
 
 tika:
   max-string-length: 10000

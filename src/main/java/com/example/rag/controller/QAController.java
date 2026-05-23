@@ -50,6 +50,13 @@ public class QAController extends BaseController {
         return ResponseEntity.ok(success(messages));
     }
 
+    @DeleteMapping("/sessions/{sessionId}")
+    @Operation(summary = "删除会话", description = "删除指定会话及其所有问答记录")
+    public ResponseEntity<ApiResponse<Void>> deleteSession(@PathVariable UUID sessionId) {
+        qaService.deleteSession(sessionId);
+        return ResponseEntity.ok(success("会话已删除", null));
+    }
+
     @GetMapping("/history")
     @Operation(summary = "获取对话历史", description = "分页获取用户的提问历史")
     public ResponseEntity<ApiResponse<PagedResponse<Question>>> getHistory(

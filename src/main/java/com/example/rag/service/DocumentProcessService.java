@@ -1,5 +1,7 @@
 package com.example.rag.service;
 
+import com.example.rag.document.CarDocumentMetadata;
+import com.example.rag.document.MarkdownFrontmatterExtractor;
 import com.example.rag.entity.Document;
 import com.example.rag.mapper.DocumentMapper;
 import lombok.RequiredArgsConstructor;
@@ -9,114 +11,56 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.StringJoiner;
 
 /**
  * 文档异步处理服务
  * <p>
  * 负责将上传的文档文件解析、分块、向量化并存入数据库。
  * 整个流程在独立线程池中异步执行，不阻塞用户的 HTTP 请求。
+ * </p>
  *
- * <h3>处理流程概览</h3>
- * <pre>
- * 用户上传文件
- *   └── DocumentService.uploadDocument()
- *        ├── ① 保存文件到磁盘
- *        ├── ② 插入 document 记录（状态 = UPLOADING）
- *        └── ③ 调用本服务 processDocument() ──异步──→ ④ 解析 → ⑤ 分块 → ⑥ 向量化 → ⑦ 状态更新
- * </pre>
+ * <h3>车系 MD 文档的分块策略</h3>
+ * <p>
+ * 对带有 frontmatter 元数据的车系 Markdown 文档，采用"文档级元数据 + 二级标题语义分块"策略：
+ * </p>
+ * <ol>
+ *   <li>从 frontmatter 提取品牌/车系/标签/竞品等元数据</li>
+ *   <li>按 ## 二级标题拆分为独立章节（如"配置与价格""动力与油耗"）</li>
+ *   <li>每个 chunk 携带文档元数据 + 章节标题前缀，形成自包含的语义单元</li>
+ *   <li>超长章节（>6000 字符）按 ### 三级标题或段落边界做二次拆分</li>
+ * </ol>
  *
  * <h3>状态机</h3>
- * UPLOADING → PROCESSING → INDEXED（成功）
- *                        → FAILED（失败/无内容）
+ * UPLOADING → PROCESSING → INDEXED（成功） / FAILED（失败）
  *
- * @see DocumentService 文档上传入口
- * @see VectorService 向量生成与检索
- * @see DocumentParserService 文档内容提取（Tika/ZIP 回退）
+ * @see DocumentService      文档上传入口
+ * @see VectorService        向量生成与检索
+ * @see DocumentParserService 文档内容提取
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DocumentProcessService {
 
+    /** 单个 chunk 的最大字符数（≈1500 tokens for Chinese） */
+    private static final int MAX_CHUNK_CHARS = 6000;
+
     private final DocumentMapper documentMapper;
-
     private final VectorService vectorService;
-
     private final DocumentParserService documentParserService;
 
-    /**
-     * Markdown 章节分块策略
-     * 保持 frontmatter 和 ## 标题章节的结构完整性
-     */
-    private List<String> markdownSectionChunk(String content) {
-        List<String> chunks = new ArrayList<>();
-        String body = content;
+    // ==================== 入口：异步文档处理 ====================
 
-        if (content.startsWith("---")) {
-            int endIdx = content.indexOf("---", 3);
-            if (endIdx >= 0) {
-                String frontmatter = content.substring(0, endIdx + 3).trim();
-                body = content.substring(endIdx + 3).trim();
-                if (frontmatter.length() >= 30 && frontmatter.length() <= 500) {
-                    chunks.add(frontmatter);
-                } else if (frontmatter.length() > 500) {
-                    chunks.add(frontmatter.substring(0, 500));
-                }
-            }
-        }
-
-        String[] sections = body.split("(?=\\n##\\s)");
-        for (String section : sections) {
-            section = section.trim();
-            if (section.isEmpty()) continue;
-
-            if (section.length() <= 500) {
-                chunks.add(section);
-            } else {
-                String[] subsections = section.split("(?=\\n###\\s)");
-                for (String sub : subsections) {
-                    sub = sub.trim();
-                    if (sub.isEmpty()) continue;
-                    if (sub.length() <= 500) {
-                        chunks.add(sub);
-                    } else {
-                        chunks.addAll(smartChunkContent(sub));
-                    }
-                }
-            }
-        }
-        return chunks;
-    }
-
-    /**
-     * 异步处理文档：解析内容 → 智能分块 → 向量化并入库
-     * <p>
-     * 通过 {@code @Async("documentProcessExecutor")} 注解，
-     * 该方法会在名为 "documentProcessExecutor" 的线程池中执行，
-     * 不会阻塞调用方（HTTP 请求线程）。
-     * <p>
-     * 线程池配置见 {@code com.example.rag.config.AsyncConfig}
-     *
-     * @param document 已入库的文档实体，包含文件路径、标题等信息
-     */
     @Async("documentProcessExecutor")
     public void processDocument(Document document) {
-        // ===== 阶段 1：标记文档为「处理中」 =====
-        // 先更新状态，让前端可以通过轮询 GET /api/documents/{id} 看到进度
         document.setStatus(Document.Status.PROCESSING);
         documentMapper.updateById(document);
 
         try {
-            // ===== 阶段 2：解析文档内容 =====
-            // DocumentParserService 内部会：
-            //   1. 纯文本文件（.txt/.md 等）→ 直接读取
-            //   2. 其他格式 → Tika 自动检测解析
-            //   3. Tika 失败时 → ZIP 回退（直接提取归档中的 HTML/XML/TXT）
             String content = documentParserService.parseDocument(
-                    document.getFilePath(),
-                    document.getTitle());
+                    document.getFilePath(), document.getTitle());
 
-            // 解析结果为空 → 标记失败，直接返回
             if (content == null || content.trim().isEmpty()) {
                 log.warn("Document has no extractable content: {}", document.getId());
                 document.setStatus(Document.Status.FAILED);
@@ -124,183 +68,275 @@ public class DocumentProcessService {
                 return;
             }
 
-            // ===== 阶段 3：智能分块（Chunking） =====
-            // MD 文档使用章节分块策略，保持结构完整性
-            List<String> chunks;
-            if ("md".equalsIgnoreCase(document.getFileType()) || "markdown".equalsIgnoreCase(document.getFileType())) {
-                chunks = markdownSectionChunk(content);
-            } else {
-                chunks = smartChunkContent(content);
-            }
+            List<String> chunks = isMarkdown(document)
+                    ? chunkMarkdownDocument(content)
+                    : chunkGenericDocument(content);
 
-            // ===== 阶段 4：向量化并入库 =====
-            // 遍历每个分块，调用 Embedding 模型生成向量，存入 pgvector
             int chunkIndex = 0;
             for (String chunk : chunks) {
                 if (!chunk.trim().isEmpty()) {
-                    // embed() 内部：
-                    //   优先用阿里云 DashScope text-embedding-v4
-                    //   API 不可用时降级为基于 hash 的 mock 向量
                     float[] embedding = vectorService.embed(chunk);
-
-                    // 将分块内容和向量一起写入 document_chunk_vector 表
                     vectorService.saveDocumentChunk(document.getId(), chunkIndex, chunk, embedding);
                     chunkIndex++;
                 }
             }
 
-            log.info("Document processed: {} chunks created for document {}", chunkIndex, document.getId());
-
-            // ===== 阶段 5：标记完成 =====
-            // INDEXED 状态表示文档已经可以被检索和问答了
+            log.info("Document processed: {} chunks for {}", chunkIndex, document.getId());
             document.setStatus(Document.Status.INDEXED);
             documentMapper.updateById(document);
 
         } catch (Exception e) {
-            // 任何阶段出现异常都标记为 FAILED，不抛出（避免影响调用方）
             log.error("Failed to process document: {}", document.getId(), e);
             document.setStatus(Document.Status.FAILED);
             documentMapper.updateById(document);
         }
     }
 
+    // ==================== Markdown 文档分块（车系专用） ====================
+
     /**
-     * 智能文本分块（Chunking）
+     * 对 Markdown 文档进行语义分块
      * <p>
-     * 将长文档按段落切分成大小合适的片段。目标是每个 chunk 足够自包含
-     * 且长度适中（50~500 字符），以便嵌入为向量后进行语义检索时能得到
-     * 高质量的匹配结果。
-     *
-     * <h3>分块策略（按段落处理）</h3>
-     * <ol>
-     *   <li>用连续空行（2个以上换行）作为段落分割符</li>
-     *   <li><b>适中段落（50~500 字符）</b>：直接作为一个 chunk</li>
-     *   <li><b>短段落（&lt;50 字符）</b>：尝试合并到前一个 chunk
-     *       <ul>
-     *         <li>合并后 ≤500 → 合并成功</li>
-     *         <li>合并后 &gt;500 → 分别独立保存</li>
-     *         <li>没有前一个 chunk → 单独作为一个 chunk</li>
-     *       </ul>
-     *   </li>
-     *   <li><b>长段落（&gt;500 字符）</b>：先按句子拆分，再按 ≤500 聚合成 chunk</li>
-     * </ol>
-     *
-     * @param content 文档清洗后的全文
-     * @return 分块后的文本列表，每个元素 ≤500 字符
+     * 如果文档包含 frontmatter 元数据（车系文档），采用"元数据前缀 + ## 章节拆分"策略。
+     * 否则退化为段落级通用分块。
      */
-    private List<String> smartChunkContent(String content) {
-        List<String> chunks = new ArrayList<>();
-
-        // \\n{2,} 匹配 2 个或更多连续换行符 → 以"段落间空行"作为分割边界
-        // 例如："第一段\n\n\n第二段" 会被切成 ["第一段", "第二段"]
-        String[] paragraphs = content.split("\\n{2,}");
-
-        for (String paragraph : paragraphs) {
-            paragraph = paragraph.trim();
-            if (paragraph.isEmpty()) {
-                continue; // 跳过全空白的"段落"
-            }
-
-            // ---- 情况 A：段落长度刚好合适（50 ~ 500 字符） ----
-            if (paragraph.length() >= 50 && paragraph.length() <= 500) {
-                chunks.add(paragraph);
-
-            // ---- 情况 B：段落偏短（< 50 字符，如标题、单行） ----
-            } else if (paragraph.length() < 50) {
-                if (!chunks.isEmpty()) {
-                    // 尝试和上一个 chunk 合并
-                    String lastChunk = chunks.remove(chunks.size() - 1);
-                    String merged = lastChunk + "\n\n" + paragraph;
-                    if (merged.length() <= 500) {
-                        // 合并后长度 OK → 放回去
-                        chunks.add(merged);
-                    } else {
-                        // 合并后超长 → 各自独立
-                        chunks.add(lastChunk);
-                        chunks.add(paragraph);
-                    }
-                } else {
-                    // 还没有任何 chunk → 直接添加，即使很短
-                    chunks.add(paragraph);
-                }
-
-            // ---- 情况 C：段落太长（> 500 字符） ----
-            } else {
-                // 第一步：把长段落按标点符号拆分成句子
-                List<String> sentences = splitIntoSentences(paragraph);
-
-                // 第二步：按 500 字符上限将句子聚合成 chunk
-                StringBuilder currentChunk = new StringBuilder();
-                for (String sentence : sentences) {
-                    // 如果当前 chunk 加上新句子会超长，先保存当前 chunk
-                    if (currentChunk.length() + sentence.length() > 500 && currentChunk.length() > 0) {
-                        chunks.add(currentChunk.toString().trim());
-                        currentChunk = new StringBuilder();
-                    }
-                    currentChunk.append(sentence).append(" ");
-                }
-
-                // 别漏了最后一段
-                if (currentChunk.length() > 0) {
-                    String finalChunk = currentChunk.toString().trim();
-                    if (!finalChunk.isEmpty()) {
-                        chunks.add(finalChunk);
-                    }
-                }
-            }
+    private List<String> chunkMarkdownDocument(String content) {
+        if (MarkdownFrontmatterExtractor.hasFrontmatter(content)) {
+            return chunkCarMarkdown(content);
         }
-
-        return chunks;
+        return chunkGenericDocument(MarkdownFrontmatterExtractor.extractBody(content));
     }
 
     /**
-     * 按句子边界拆分文本
+     * 车系 Markdown 文档的核心分块策略
      * <p>
-     * 使用正则正向回顾断言 {@code (?<=[。！？.!?])}，
-     * 在中英文标点符号之后切分文本，保留标点符号在句子末尾。
+     * 步骤：
+     * <ol>
+     *   <li>提取 frontmatter → CarDocumentMetadata → 构建元数据前缀</li>
+     *   <li>分割正文：按 {@code ## } 二级标题切分为章节</li>
+     *   <li>每个章节拼接"元数据前缀 + 章节标题 + 章节内容"</li>
+     *   <li>超长章节（>MAX_CHUNK_CHARS）按三级标题或段落二次拆分</li>
+     * </ol>
      *
-     * <h3>示例</h3>
+     * <h3>拆分示例（凯美瑞文档）</h3>
      * <pre>
-     * 输入："你好。世界！测试文本"
-     * 输出：["你好。", "世界！", "测试文本"]
+     * Chunk 1：元数据前缀 + "## 基本信息" + 尺寸/轴距/动力版本
+     * Chunk 2：元数据前缀 + "## 配置与价格" + 价格表
+     * Chunk 3：元数据前缀 + "## 动力与油耗" + 油耗数据
+     * Chunk 4：元数据前缀 + "## 核心卖点" + 卖点列表
+     * Chunk 5：元数据前缀 + "## 适合人群" + 用户画像
+     * Chunk 6：元数据前缀 + "## 竞品对比" + 对比分析
      * </pre>
-     *
-     * <h3>降级策略</h3>
-     * 如果文本中没有任何标点符号（如纯英文无标点的长字符串），
-     * 按每 200 字符一刀切的方式降级处理。
-     *
-     * @param text 待拆分的文本段落
-     * @return 按句子边界切分后的列表
      */
-    private List<String> splitIntoSentences(String text) {
-        List<String> sentences = new ArrayList<>();
+    private List<String> chunkCarMarkdown(String content) {
+        // 1. 提取元数据
+        CarDocumentMetadata meta = MarkdownFrontmatterExtractor.extractCarMetadata(content);
+        String body = MarkdownFrontmatterExtractor.extractBody(content);
+        String metaPrefix = buildMetadataPrefix(meta);
 
-        // (?<=...) 是「正向回顾」（positive lookbehind）
-        // 含义：在 [。！？.!?] 这些字符「之后」的位置切分
-        // \\s* 匹配切分后开头可能残留的空白字符
-        // 这样每个句子末尾会保留标点符号，语义更完整
-        String[] parts = text.split("(?<=[。！？.!?])\\s*");
+        // 2. 按 ## 分割章节
+        List<String> chapters = splitByHeading2(body);
 
-        for (String part : parts) {
-            part = part.trim();
-            if (!part.isEmpty()) {
-                sentences.add(part);
+        // 3. 为每个章节拼接元数据前缀
+        List<String> chunks = new ArrayList<>();
+        for (String chapter : chapters) {
+            String enriched = metaPrefix + "\n\n" + chapter;
+            if (enriched.length() <= MAX_CHUNK_CHARS) {
+                chunks.add(enriched);
+            } else {
+                chunks.addAll(splitLongChapter(enriched, metaPrefix));
             }
         }
 
-        // 如果按标点切分后一个句子都没产生（纯无标点长文本）
-        // 降级为固定长度切分
-        if (sentences.isEmpty()) {
-            int chunkSize = 200;
-            for (int i = 0; i < text.length(); i += chunkSize) {
-                int end = Math.min(i + chunkSize, text.length());
-                String chunk = text.substring(i, end).trim();
-                if (!chunk.isEmpty()) {
-                    sentences.add(chunk);
+        logChunks(chunks, meta);
+        return chunks;
+    }
+
+    // ==================== 元数据拼接 ====================
+
+    /**
+     * 构建文档级元数据前缀
+     * <p>
+     * 格式：
+     * <pre>
+     * 【品牌:丰田】【车系:凯美瑞】【车型:中型轿车】【能源:燃油/双擎混动】
+     * 【价格:17.98-26.98万】【标签:商务家用、混动省油、B级标杆】
+     * 【竞品:本田雅阁、大众帕萨特】【卖点:丰田双擎、舒适标杆、保值率高】
+     * </pre>
+     * 元数据随每个 chunk 一起 embedding，检索时能自然匹配到品牌/车系/标签等信息。
+     */
+    private String buildMetadataPrefix(CarDocumentMetadata meta) {
+        StringJoiner joiner = new StringJoiner("\n");
+        joiner.add(formatMeta("品牌", meta.getBrand(), meta.getModel()));
+        joiner.add(formatMeta("车型", meta.getCarType(), meta.getFuelType()));
+        joiner.add(formatMeta("价格", meta.getPriceRange()));
+        joiner.add(formatMeta("标签", joinOrDefault(meta.getTags(), "")));
+        joiner.add(formatMeta("竞品", joinOrDefault(meta.getCompetitors(), "")));
+        joiner.add(formatMeta("卖点", meta.getSalesPoints()));
+        joiner.add(formatMeta("适合人群", meta.getTargetUsers()));
+        return joiner.toString();
+    }
+
+    private static String formatMeta(String label, String... values) {
+        StringBuilder sb = new StringBuilder("【").append(label).append(":");
+        boolean hasValue = false;
+        for (String v : values) {
+            if (v != null && !v.isEmpty()) {
+                if (hasValue) sb.append("/");
+                sb.append(v);
+                hasValue = true;
+            }
+        }
+        if (!hasValue) return "";
+        return sb.append("】").toString();
+    }
+
+    private static String joinOrDefault(List<String> list, String defaultValue) {
+        if (list == null || list.isEmpty()) return defaultValue;
+        return String.join("、", list);
+    }
+
+    // ==================== 章节分割 ====================
+
+    /**
+     * 按 ## 二级标题拆分正文
+     * <p>
+     * 正则 {@code (?=\n##\s)} 在"换行 + ## + 空格"之前的位置切开，
+     * 保留每个章节开头完整的 ## 标题行。
+     */
+    static List<String> splitByHeading2(String body) {
+        List<String> chapters = new ArrayList<>();
+        String[] sections = body.split("(?=\n##\\s)");
+        for (String section : sections) {
+            section = section.trim();
+            if (section.isEmpty()) continue;
+            chapters.add(section);
+        }
+        return chapters;
+    }
+
+    // ==================== 超长章节二次拆分 ====================
+
+    /**
+     * 对超长章节进行二次拆分
+     * <p>
+     * 策略：
+     * <ol>
+     *   <li>有三级标题（###）→ 按三级标题拆分</li>
+     *   <li>无三级标题 → 按段落边界（双空行）拆分，每个子块追加元数据前缀</li>
+     *   <li>单个段落仍超长 → 按句子边界切分</li>
+     * </ol>
+     *
+     * @param fullChapter 完整章节内容（已含元数据前缀）
+     * @param metaPrefix  元数据前缀（用于追加到每个子块）
+     * @return 拆分后的子块列表
+     */
+    private List<String> splitLongChapter(String fullChapter, String metaPrefix) {
+        List<String> subChunks = new ArrayList<>();
+
+        // 找到第一个 ## 之后的内容（去掉已包含的标题行）
+        String bodyOnly = fullChapter;
+        int headingEnd = fullChapter.indexOf("\n", fullChapter.indexOf("## "));
+        if (headingEnd > 0) {
+            String headingLine = fullChapter.substring(0, headingEnd);
+            bodyOnly = fullChapter.substring(headingEnd).trim();
+
+            // 有三级标题 → 按 ### 拆分
+            if (bodyOnly.contains("\n### ")) {
+                String[] subsections = bodyOnly.split("(?=\\n###\\s)");
+                for (String sub : subsections) {
+                    sub = sub.trim();
+                    if (sub.isEmpty()) continue;
+                    String enriched = metaPrefix + "\n\n" + headingLine + "\n" + sub;
+                    if (enriched.length() <= MAX_CHUNK_CHARS) {
+                        subChunks.add(enriched);
+                    } else {
+                        subChunks.addAll(splitByParagraphs(enriched, metaPrefix));
+                    }
                 }
+                return subChunks;
             }
+
+            // 无三级标题 → 按段落拆分
+            return splitByParagraphs(fullChapter, metaPrefix);
         }
 
-        return sentences;
+        return splitByParagraphs(fullChapter, metaPrefix);
+    }
+
+    /**
+     * 按段落边界拆分长文本
+     */
+    private List<String> splitByParagraphs(String text, String metaPrefix) {
+        List<String> parts = new ArrayList<>();
+        String body = text;
+        String heading = "";
+
+        int headingEnd = text.indexOf("\n", text.indexOf("## "));
+        if (headingEnd > 0) {
+            heading = text.substring(0, headingEnd) + "\n";
+            body = text.substring(headingEnd).trim();
+        }
+
+        StringBuilder current = new StringBuilder(metaPrefix + "\n\n" + heading);
+        String[] paragraphs = body.split("\\n{2,}");
+
+        for (String para : paragraphs) {
+            para = para.trim();
+            if (para.isEmpty()) continue;
+
+            if (current.length() + para.length() + 2 > MAX_CHUNK_CHARS && current.length() > metaPrefix.length() + 10) {
+                parts.add(current.toString().trim());
+                current = new StringBuilder(metaPrefix + "\n\n" + heading);
+            }
+            current.append(para).append("\n\n");
+        }
+
+        if (current.length() > metaPrefix.length() + 10) {
+            parts.add(current.toString().trim());
+        }
+        return parts;
+    }
+
+    // ==================== 通用文档分块（非 Markdown） ====================
+
+    private List<String> chunkGenericDocument(String content) {
+        List<String> chunks = new ArrayList<>();
+        String[] paragraphs = content.split("\\n{2,}");
+
+        StringBuilder current = new StringBuilder();
+        for (String para : paragraphs) {
+            para = para.trim();
+            if (para.isEmpty()) continue;
+
+            if (current.length() + para.length() > MAX_CHUNK_CHARS && current.length() > 0) {
+                chunks.add(current.toString().trim());
+                current = new StringBuilder();
+            }
+            if (current.length() > 0) current.append("\n\n");
+            current.append(para);
+        }
+        if (current.length() > 0) {
+            chunks.add(current.toString().trim());
+        }
+        return chunks;
+    }
+
+    // ==================== 工具方法 ====================
+
+    private static boolean isMarkdown(Document doc) {
+        String type = doc.getFileType();
+        return "md".equalsIgnoreCase(type) || "markdown".equalsIgnoreCase(type);
+    }
+
+    private void logChunks(List<String> chunks, CarDocumentMetadata meta) {
+        log.info("Chunked car doc [{} {}] into {} chunks (max {} chars/chunk)",
+                meta.getBrand(), meta.getModel(), chunks.size(), MAX_CHUNK_CHARS);
+        for (int i = 0; i < chunks.size(); i++) {
+            String firstLine = chunks.get(i).lines()
+                    .filter(l -> l.startsWith("##"))
+                    .findFirst().orElse("(no heading)");
+            log.debug("  chunk {}: {} ({} chars)", i, firstLine, chunks.get(i).length());
+        }
     }
 }

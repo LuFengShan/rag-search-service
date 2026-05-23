@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:central.sonatype.com)",
+      "Bash(./mvnw clean *)",
+      "Bash(mvn --version)",
+      "Bash(mvn clean *)"
+    ]
+  }
+}

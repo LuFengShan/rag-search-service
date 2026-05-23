@@ -217,4 +217,27 @@ public class QAService {
                 .totalPages((int) questionPage.getPages())
                 .build();
     }
+
+    /**
+     * 删除指定会话
+     * <p>
+     * 执行步骤：
+     * <ol>
+     *   <li>查询该会话下的所有问题ID</li>
+     *   <li>批量删除所有关联的答案</li>
+     *   <li>删除该会话下的所有问题</li>
+     * </ol>
+     * 三个操作在同一事务中，保证数据一致性。
+     *
+     * @param sessionId 会话ID
+     */
+    @Transactional
+    public void deleteSession(UUID sessionId) {
+        List<UUID> questionIds = questionMapper.findQuestionIdsBySessionId(sessionId);
+        if (!questionIds.isEmpty()) {
+            answerMapper.deleteByQuestionIds(questionIds);
+        }
+        questionMapper.deleteBySessionId(sessionId);
+        log.info("Session deleted: sessionId={}, questions removed={}", sessionId, questionIds.size());
+    }
 }

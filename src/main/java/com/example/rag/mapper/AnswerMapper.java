@@ -2,8 +2,11 @@ package com.example.rag.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.example.rag.entity.Answer;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -41,4 +44,17 @@ public interface AnswerMapper extends BaseMapper<Answer> {
                 .eq(Answer::getQuestionId, questionId));
         return Optional.ofNullable(answer);
     }
+
+    /**
+     * 批量删除指定问题的答案
+     *
+     * @param questionIds 问题ID列表
+     */
+    @Delete("<script>" +
+            "DELETE FROM answer WHERE question_id IN " +
+            "<foreach collection='list' item='id' open='(' separator=',' close=')'>" +
+            "#{id}::uuid" +
+            "</foreach>" +
+            "</script>")
+    void deleteByQuestionIds(@Param("list") List<UUID> questionIds);
 }

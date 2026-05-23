@@ -1,0 +1,57 @@
+# 开发环境配置
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/example_db
+    username: postgres
+    password: 123456
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+
+  ai:
+    openai:
+      api-key: ${ANTHROPIC_AUTH_TOKEN:sk-your-deepseek-api-key}
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-chat
+          temperature: 0.7
+      embedding:
+        enabled: false
+
+dashscope:
+  api-key: ${DASHSCOPE_API_KEY:your-dashscope-api-key}
+  embedding:
+    model: text-embedding-v4
+    dimensions: 1536
+
+jwt:
+  secret: dev-secret-key-change-in-production-must-be-at-least-32-characters
+  expiration: 1800000
+  refresh-expiration: 604800000
+
+logging:
+  level:
+    root: INFO
+    com.example.rag: DEBUG
+    com.example.rag.controller: INFO
+    com.example.rag.service: INFO
+    com.example.rag.mapper: DEBUG
+    org.springframework.security: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{traceId}] [%X{spanId}] - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{traceId}] [%X{spanId}] - %msg%n"
+  file:
+    name: ./logs/rag-app-dev.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 30
+      total-size-cap: 1GB

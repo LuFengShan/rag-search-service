@@ -6,6 +6,9 @@ import com.example.rag.mapper.DocumentChunkVectorMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -167,22 +170,36 @@ public class VectorService {
      * 生成文本的向量表示
      * <p>
      * 调用 Embedding 模型将文本转换为向量。
-     * 如果 API 调用失败，使用降级方案生成伪随机向量。
+     * 如果 API 调用失败，最多重试3次。
+     * 如果所有重试都失败，使用降级方案生成伪随机向量。
      *
      * @param text 待向量化的文本
      * @return 向量数组（1536维）
      */
+    @Retryable(
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 1000, multiplier = 2),
+            recover = "embedFallback"
+    )
     public float[] embed(String text) {
-        try {
-            // 调用 Embedding 模型
-            float[] result = embeddingModel.embed(text);
-            log.debug("Generated embedding via Alibaba text-embedding-v4, dimension={}", result.length);
-            return result;
-        } catch (Exception e) {
-            // API 失败时使用降级方案
-            log.warn("Embedding API failed, using fallback mock embedding: {}", e.getMessage());
-            return generateFallbackEmbedding(text);
-        }
+        float[] result = embeddingModel.embed(text);
+        log.debug("Generated embedding via Alibaba text-embedding-v4, dimension={}", result.length);
+        return result;
+    }
+
+    /**
+     * embed 方法的降级恢复方法
+     * <p>
+     * 当所有重试都失败时，使用基于文本哈希的伪随机向量作为降级方案。
+     *
+     * @param e 最后一次重试抛出的异常
+     * @param text 待向量化的文本
+     * @return 伪随机向量数组
+     */
+    @Recover
+    public float[] embedFallback(Exception e, String text) {
+        log.warn("Embedding API failed after retries, using fallback mock embedding: {}", e.getMessage());
+        return generateFallbackEmbedding(text);
     }
 
     /**
